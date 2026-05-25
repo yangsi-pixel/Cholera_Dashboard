@@ -1,0 +1,259 @@
+.admin-page {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  padding: 24px;
+  gap: 24px;
+  background: linear-gradient(135deg, #eef6ff 0%, #d7ebff 48%, #f8fcff 100%);
+}
+
+.admin-card {
+  width: 100%;
+  max-width: 720px;
+  background: #ffffff;
+  border: 1px solid #d6e8fb;
+  border-radius: 16px;
+  box-shadow: 0 10px 30px rgba(9, 74, 139, 0.12);
+  padding: 28px;
+}
+
+.admin-card h1 {
+  margin: 0;
+  color: #0e3f75;
+  font-size: 1.6rem;
+  line-height: 1.35;
+}
+
+.admin-subtitle {
+  margin: 10px 0 20px;
+  color: #2d5f93;
+  font-size: 0.95rem;
+}
+
+.admin-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px 16px;
+}
+
+.admin-form label {
+  color: #0f4a84;
+  font-weight: 600;
+  font-size: 0.88rem;
+  margin-bottom: -6px;
+}
+
+.admin-form input,
+.admin-form select,
+.admin-form button {
+  font: inherit;
+}
+
+.admin-form input,
+.admin-form select {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #b5d1ed;
+  border-radius: 10px;
+  padding: 10px 12px;
+  background-color: #fcfeff;
+  color: #153e67;
+}
+
+.admin-form input:focus,
+.admin-form select:focus {
+  outline: 3px solid rgba(0, 128, 255, 0.16);
+  border-color: #1d79d6;
+}
+
+.admin-form button {
+  grid-column: 1 / -1;
+  margin-top: 8px;
+  border: none;
+  border-radius: 10px;
+  padding: 12px;
+  background: #0d6cc5;
+  color: #ffffff;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.admin-form button:hover:not(:disabled) {
+  background: #0958a2;
+}
+
+.admin-form button:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.status-message {
+  margin-top: 16px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-weight: 600;
+}
+
+.status-message.success {
+  background: #e6f8ef;
+  color: #0f6a37;
+  border: 1px solid #b9e8cd;
+}
+
+.status-message.error {
+  background: #fff0f0;
+  color: #9a1f1f;
+  border: 1px solid #f3c6c6;
+}
+
+.dashboard-card {
+  width: 100%;
+  max-width: 1150px;
+  background: #ffffff;
+  border: 1px solid #d6e8fb;
+  border-radius: 16px;
+  box-shadow: 0 10px 30px rgba(9, 74, 139, 0.12);
+  padding: 24px;
+}
+
+.dashboard-header h2 {
+  margin: 0;
+  color: #0e3f75;
+}
+
+.dashboard-header p {
+  margin: 8px 0 0;
+  color: #2d5f93;
+}
+
+.dashboard-state {
+  margin-top: 14px;
+  color: #124777;
+  font-weight: 600;
+}
+
+.dashboard-state.error {
+  color: #9a1f1f;
+}
+
+.dashboard-grid {
+  margin-top: 18px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.chart-card {
+  border: 1px solid #d8e8f9;
+  border-radius: 12px;
+  padding: 14px;
+  background: #fcfeff;
+}
+
+.chart-card h3 {
+  margin: 0 0 8px;
+  color: #114b82;
+  font-size: 1rem;
+}
+
+.chart-wrap {
+  width: 100%;
+  height: 300px;
+}
+
+.map-card {
+  grid-column: 1 / -1;
+}
+
+.map-wrap {
+  position: relative;
+}
+
+.hotspot-map {
+  width: 100%;
+  min-height: 390px;
+  border-radius: 12px;
+  background: radial-gradient(circle at 35% 20%, #eef6ff, #dbeaff);
+  border: 1px solid #cce2f8;
+}
+
+.hotspot-map path {
+  cursor: pointer;
+  transition: opacity 0.2s ease;
+}
+
+.hotspot-map path:hover {
+  opacity: 0.82;
+}
+
+.map-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  color: #1e568b;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.legend-scale {
+  width: 160px;
+  height: 12px;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    #fee5d9 0%,
+    #fc9272 30%,
+    #fb6a4a 55%,
+    #de2d26 78%,
+    #a50f15 100%
+  );
+  border: 1px solid #e7b8aa;
+}
+
+.map-tooltip {
+  position: absolute;
+  right: 12px;
+  top: 12px;
+  min-width: 160px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px;
+  border-radius: 8px;
+  background: rgba(11, 56, 99, 0.9);
+  color: #ffffff;
+  font-size: 0.82rem;
+  box-shadow: 0 8px 20px rgba(6, 34, 61, 0.3);
+}
+
+@media (max-width: 700px) {
+  .admin-card {
+    padding: 18px;
+  }
+
+  .admin-form {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .dashboard-card {
+    padding: 14px;
+  }
+
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .hotspot-map {
+    min-height: 300px;
+  }
+
+  .map-tooltip {
+    position: static;
+    margin-top: 10px;
+  }
+}
