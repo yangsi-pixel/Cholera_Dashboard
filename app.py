@@ -1,15 +1,17 @@
-import streamlit as st
+import os
+import json
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import requests
-import os
-import json
-from datetime import datetime, timedelta
+import streamlit as st
+from prediction_features import PREDICTION_FEATURE_COLUMNS, create_prediction_features, predict_next_month_risk
+from region_coords import DEFAULT_COORDS, REGION_COORDS
 
 try:
-    import pydeck as pdk
+    import geopandas as gpd
 except ImportError:
-    pdk = None
+    gpd = None
 
 try:
     from pymongo import MongoClient
@@ -18,136 +20,502 @@ except ImportError:
     MongoClient = None
     ServerApi = None
 
-# Load your dataset
-df = pd.read_csv("region_period_summary_0_5380.csv")
-district_df = pd.read_csv("dataset_with_only_district.csv")
+try:
+    import joblib
+except ImportError:
+    joblib = None
 
-# Extract year from TL column (starting date)
-df['TL'] = pd.to_datetime(df['TL'], errors='coerce')
-df['year'] = df['TL'].dt.year
-district_df['TL'] = pd.to_datetime(district_df['TL'], errors='coerce')
-district_df['year'] = district_df['TL'].dt.year
-
-# Ensure numeric aggregation works even when source CSV has blanks
-for col in ['sCh', 'cCh', 'deaths']:
-    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-    district_df[col] = pd.to_numeric(district_df[col], errors='coerce').fillna(0)
-
-def normalize_region_name(series):
-    return series.astype(str).str.lower().str.replace(r"[^a-z0-9]", "", regex=True)
-
-def normalize_single_region_name(name):
-    return normalize_region_name(pd.Series([name])).iloc[0]
-
-df['region_norm'] = normalize_region_name(df['region_en'])
-district_df['region_norm'] = normalize_region_name(district_df['region_en'])
 
 MONGODB_URI = os.getenv(
     "MONGODB_URI",
-    "mongodb+srv://yangsisonia9_db_user:64687@cluster0.295yjzd.mongodb.net/"
+    "mongodb+srv://yangsisonia9_db_user:64687@cluster0.295yjzd.mongodb.net/",
 )
 
-def canonicalize_disease_name(value):
-    raw = str(value or "").strip()
-    norm = "".join(ch for ch in raw.lower() if ch.isalnum())
+CMAP = {"Confirmed": "#1e5fd8", "Suspected": "#f9a825", "Deaths": "#d32f2f"}
+RISK_COLOR_MAP = {"Low": "#2e7d32", "Medium": "#ef6c00", "High": "#c62828"}
+RISK_LABELS = {0: "Low", 1: "Medium", 2: "High"}
+ENSEMBLE_RISK_LABELS = {0: "Low", 1: "High"}
 
-    aliases = {
-        "cholera": "Cholera",
-        "covid": "COVID-19",
-        "covid19": "COVID-19",
-        "coronavirus": "COVID-19",
-        "sarscov2": "COVID-19",
-        "measles": "Measles",
-        "mpox": "Mpox",
-        "monkeypox": "Mpox",
-        "influenza": "Influenza",
-        "flu": "Influenza",
+
+def normalize_region_name(series: pd.Series) -> pd.Series:
+    # Normalize region labels and collapse known aliases to stable keys.
+    normalized = series.astype(str).str.lower().str.replace(r"[^a-z0-9]", "", regex=True)
+    return normalized.replace(
+        {
+            "adamawa": "adamaoua",
+            "northwestregion": "northwest",
+            "northwestprovince": "northwest",
+            "southwestregion": "southwest",
+            "southwestprovince": "southwest",
+        }
+    )
+
+
+@st.cache_data(ttl=3600)
+def load_historical_data():
+    # Load and standardize the two historical datasets used by the dashboard.
+    district_df = pd.read_csv("FINAL district_dataset_clean.csv")
+    regional_env_df = pd.read_csv("FINAL regional_cholera_environment_dataset.csv")
+
+    if "Region" in district_df.columns:
+        district_df["region_en"] = district_df["Region"].astype(str)
+    elif "region_en" not in district_df.columns:
+        district_df["region_en"] = "Unknown"
+
+    if "district" not in district_df.columns:
+        if "Location" in district_df.columns:
+            district_df["district"] = (
+                district_df["Location"]
+                .astype(str)
+                .str.split("::")
+                .str[-1]
+                .str.replace(" Health District", "", regex=False)
+                .str.strip()
+            )
+        else:
+            district_df["district"] = "Unknown"
+
+    if "Region" in regional_env_df.columns:
+        regional_env_df["region_en"] = regional_env_df["Region"].astype(str)
+    elif "region_en" not in regional_env_df.columns:
+        regional_env_df["region_en"] = "Unknown"
+
+    district_df["TL"] = pd.to_datetime(district_df["TL"], errors="coerce")
+    district_df["year"] = district_df["TL"].dt.year
+    regional_env_df["TL"] = pd.to_datetime(regional_env_df["TL"], errors="coerce")
+    regional_env_df["year"] = regional_env_df["TL"].dt.year
+
+    for col in ["sCh", "cCh", "deaths"]:
+        district_df[col] = pd.to_numeric(district_df[col], errors="coerce").fillna(0)
+        regional_env_df[col] = pd.to_numeric(regional_env_df[col], errors="coerce").fillna(0)
+
+    # Keep only historical fields required for CFR-based analytics.
+    regional_env_df = regional_env_df[["region_en", "TL", "year", "sCh", "cCh", "deaths"]].copy()
+
+    district_df["region_norm"] = normalize_region_name(district_df["region_en"])
+    regional_env_df["region_norm"] = normalize_region_name(regional_env_df["region_en"])
+
+    years = sorted(
+        pd.Index(district_df["year"].dropna().astype(int).unique())
+        .union(pd.Index(regional_env_df["year"].dropna().astype(int).unique()))
+        .tolist()
+    )
+
+    regions = ["All Regions"] + sorted(
+        pd.Index(district_df["region_en"].dropna().astype(str).unique())
+        .union(pd.Index(regional_env_df["region_en"].dropna().astype(str).unique()))
+        .tolist()
+    )
+
+    return district_df, regional_env_df, years, regions
+
+
+def aggregate_regional_all_regions_by_tl(df_input: pd.DataFrame) -> pd.DataFrame:
+    # Aggregate regional records to one row per TL period for All Regions views.
+    aggregated = (
+        df_input.groupby("TL", as_index=False)
+        .agg(
+            {
+                "sCh": "sum",
+                "cCh": "sum",
+                "deaths": "sum",
+            }
+        )
+        .sort_values("TL")
+    )
+    aggregated["year"] = aggregated["TL"].dt.year
+    return aggregated
+
+
+@st.cache_data(ttl=3600)
+def load_regional_hotspot_source():
+    # Load the regional cholera source file used only for the All Regions hotspot map.
+    candidate_files = [
+        "FINAL regional_cholera_environment_data.csv",
+        "FINAL regional_cholera_environment_dataset.csv",
+    ]
+    source_path = next((path for path in candidate_files if os.path.exists(path)), None)
+    if source_path is None:
+        raise FileNotFoundError("Regional cholera hotspot source file was not found.")
+
+    hotspot_df = pd.read_csv(source_path)
+    hotspot_df = hotspot_df[["Region", "reporting_date", "sCh", "cCh", "deaths"]].copy()
+
+    # Standardize region labels to match the boundary source before merging.
+    hotspot_df["Region"] = hotspot_df["Region"].replace(
+        {
+            "Adamaoua": "Adamawa",
+            "Far North": "Far-North",
+        }
+    )
+
+    # Build the map's year filter from reporting_date as requested.
+    hotspot_df["reporting_date"] = pd.to_datetime(hotspot_df["reporting_date"], errors="coerce")
+    hotspot_df["Year"] = hotspot_df["reporting_date"].dt.year
+
+    for column in ["sCh", "cCh", "deaths"]:
+        hotspot_df[column] = pd.to_numeric(hotspot_df[column], errors="coerce").fillna(0)
+
+    return hotspot_df
+
+
+@st.cache_data(ttl=3600)
+def load_regional_boundaries():
+    # Load ADM2 boundaries and dissolve them to ADM1 regional geometries.
+    if gpd is None:
+        raise RuntimeError("geopandas is not installed. Run: pip install geopandas")
+
+    candidate_files = [
+        "cmr_admin_boundaries.geojson",
+        os.path.join("cmr_admin_boundaries", "cmr_admin2.geojson"),
+    ]
+    boundary_path = next((path for path in candidate_files if os.path.exists(path)), None)
+    if boundary_path is None:
+        raise FileNotFoundError("Cameroon administrative boundary GeoJSON was not found.")
+
+    boundaries = gpd.read_file(boundary_path)
+    regional_boundaries = boundaries[["adm1_name", "geometry"]].dissolve(by="adm1_name", as_index=False)
+    return regional_boundaries
+
+
+def render_regional_hotspot_map(selected_year, selected_metric):
+    # Render the All Regions hotspot map from regional cholera totals and dissolved ADM1 boundaries.
+    hotspot_source = load_regional_hotspot_source()
+    regional_boundaries = load_regional_boundaries()
+
+    # Keep only the selected year when provided, otherwise aggregate across all years.
+    filtered_source = (
+        hotspot_source
+        if selected_year is None
+        else hotspot_source[hotspot_source["Year"] == int(selected_year)]
+    )
+    yearly_totals = filtered_source.groupby("Region", as_index=False)[["sCh", "cCh", "deaths"]].sum()
+
+    merged = regional_boundaries.merge(yearly_totals, how="left", left_on="adm1_name", right_on="Region")
+    merged[["sCh", "cCh", "deaths"]] = merged[["sCh", "cCh", "deaths"]].fillna(0)
+    merged["cfr"] = (merged["deaths"] / merged["cCh"].where(merged["cCh"] > 0, 1)) * 100
+    merged.loc[merged["cCh"] == 0, "cfr"] = 0.0
+
+    # Center the map from the dissolved regional bounds so northern regions are not clipped.
+    min_lon, min_lat, max_lon, max_lat = merged.total_bounds
+    map_center = {
+        "lat": float((min_lat + max_lat) / 2),
+        "lon": float((min_lon + max_lon) / 2),
     }
 
-    return aliases.get(norm, raw if raw else "Unknown")
+    geojson_data = json.loads(merged.to_json())
+    year_label = "All Years" if selected_year is None else str(int(selected_year))
+    map_title = f"Cameroon Regional Cholera Hotspot Map: {selected_metric} ({year_label})"
 
-def pick_first_existing(df_input, candidates):
+    fig = px.choropleth_mapbox(
+        merged,
+        geojson=geojson_data,
+        locations="adm1_name",
+        featureidkey="properties.adm1_name",
+        color=selected_metric,
+        hover_name="adm1_name",
+        hover_data={"sCh": True, "cCh": True, "deaths": True, "cfr": ":.2f", "Region": False},
+        mapbox_style="white-bg",
+        center=map_center,
+        zoom=4.35,
+        opacity=0.7,
+        title=map_title,
+    )
+    fig.update_traces(marker_line_width=1.0, marker_line_color="black")
+    fig.update_layout(margin={"r": 0, "t": 60, "l": 0, "b": 0})
+    apply_chart_layout(fig, height=620)
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def build_cfr_hotspot_data(df_input: pd.DataFrame, selected_year=None) -> pd.DataFrame:
+    # Build CFR hotspot summary per region from historical case/death data only.
+    working_df = df_input[["region_en", "TL", "cCh", "deaths"]].copy()
+    if selected_year is not None:
+        working_df = working_df[working_df["TL"].dt.year == int(selected_year)]
+
+    hotspot_df = (
+        working_df.groupby("region_en", as_index=False)[["cCh", "deaths"]]
+        .sum()
+        .rename(columns={"region_en": "region"})
+    )
+    hotspot_df["cfr"] = (hotspot_df["deaths"] / hotspot_df["cCh"].where(hotspot_df["cCh"] > 0, 1)) * 100
+    hotspot_df.loc[hotspot_df["cCh"] == 0, "cfr"] = 0.0
+    hotspot_df["cfr_risk"] = hotspot_df["cfr"].apply(classify_cfr_risk)
+    return hotspot_df.sort_values("region")
+
+
+def render_historical_cfr_hotspot_summary(df_input: pd.DataFrame, selected_year=None):
+    # Render regional CFR hotspot summary without any shapefile dependency.
+    hotspot_df = build_cfr_hotspot_data(df_input, selected_year)
+    if hotspot_df.empty:
+        st.warning("No regional records available for CFR hotspot summary.")
+        return
+
+    summary_title = "Regional CFR Hotspots"
+    if selected_year is not None:
+        summary_title = f"Regional CFR Hotspots - {int(selected_year)}"
+
+    ordered = hotspot_df.sort_values("cfr", ascending=False)
+    fig = px.bar(
+        ordered,
+        x="region",
+        y="cfr",
+        color="cfr_risk",
+        category_orders={"cfr_risk": ["High", "Medium", "Low"]},
+        color_discrete_map=RISK_COLOR_MAP,
+        labels={"region": "Region", "cfr": "CFR (%)", "cfr_risk": "Risk"},
+        title=summary_title,
+    )
+    apply_chart_layout(fig, height=520)
+    fig.update_layout(legend_title_text="")
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.dataframe(
+        ordered[["region", "cCh", "deaths", "cfr", "cfr_risk"]]
+        .rename(columns={"region": "Region", "cCh": "Confirmed", "deaths": "Deaths", "cfr": "CFR (%)", "cfr_risk": "Risk"}),
+        use_container_width=True,
+    )
+
+
+def pick_first_existing(df_input: pd.DataFrame, candidates):
+    # Return the first matching column name from a candidate list.
     for candidate in candidates:
         if candidate in df_input.columns:
             return candidate
     return None
 
-def standardize_mongo_records(raw_df):
+
+def normalize_region_for_feature(region_name) -> str:
+    # Match the one-hot naming style used by the training dataset.
+    return str(region_name or "Unknown").replace(" ", "").replace("-", "")
+
+
+def prepare_history_for_features(history_df: pd.DataFrame) -> pd.DataFrame:
+    # Standardize historical monthly rows used to build lag features.
+    history = history_df.copy()
+    if history.empty:
+        return pd.DataFrame(columns=["region_key", "month_date", "log_cases", "rainfall_avg"])
+
+    if "region" not in history.columns and "Region" in history.columns:
+        history["region"] = history["Region"]
+    if "month_date" not in history.columns:
+        date_col = pick_first_existing(history, ["reporting_date", "date", "TL"])
+        history["month_date"] = pd.to_datetime(history[date_col], errors="coerce") if date_col else pd.NaT
+    else:
+        history["month_date"] = pd.to_datetime(history["month_date"], errors="coerce")
+
+    if "log_cases" not in history.columns:
+        if "cases" in history.columns:
+            total_cases = pd.to_numeric(history["cases"], errors="coerce").fillna(0)
+        else:
+            confirmed_source = history["confirmed"] if "confirmed" in history.columns else history.get("cCh", pd.Series(0, index=history.index))
+            suspected_source = history["suspected"] if "suspected" in history.columns else history.get("sCh", pd.Series(0, index=history.index))
+            confirmed = pd.to_numeric(confirmed_source, errors="coerce").fillna(0)
+            suspected = pd.to_numeric(suspected_source, errors="coerce").fillna(0)
+            total_cases = confirmed + suspected
+        history["log_cases"] = np.log1p(total_cases)
+
+    rainfall_source = history["rainfall_avg"] if "rainfall_avg" in history.columns else pd.Series(0, index=history.index)
+    region_source = history["region"] if "region" in history.columns else pd.Series("Unknown", index=history.index)
+    history["rainfall_avg"] = pd.to_numeric(rainfall_source, errors="coerce").fillna(0)
+    history["region_key"] = region_source.apply(normalize_region_for_feature)
+    history["month_date"] = history["month_date"].dt.to_period("M").dt.to_timestamp()
+    history = history.dropna(subset=["month_date"]).sort_values(["region_key", "month_date"])
+    return history.drop_duplicates(subset=["region_key", "month_date"], keep="last")
+
+
+def build_live_history_rows(monthly_env: pd.DataFrame) -> pd.DataFrame:
+    # Convert monthly MongoDB aggregates into temporary history rows for lag features.
+    if monthly_env.empty:
+        return pd.DataFrame(columns=["Region", "month_date", "cases", "rainfall_avg"])
+
+    live_history = monthly_env[["region_en", "report_month", "cCh", "sCh", "rainfall_avg"]].copy()
+    live_history["Region"] = live_history["region_en"]
+    live_history["month_date"] = pd.to_datetime(live_history["report_month"] + "-01", errors="coerce")
+    live_history["cases"] = (
+        pd.to_numeric(live_history["cCh"], errors="coerce").fillna(0)
+        + pd.to_numeric(live_history["sCh"], errors="coerce").fillna(0)
+    )
+    live_history["rainfall_avg"] = pd.to_numeric(live_history["rainfall_avg"], errors="coerce").fillna(0)
+    return live_history[["Region", "month_date", "cases", "rainfall_avg"]].dropna(subset=["month_date"])
+
+
+def build_features(report, history_df, region_cols):
+    report_date = pd.to_datetime(report["reporting_date"], errors="coerce")
+    report_month = report_date.to_period("M").to_timestamp() if not pd.isna(report_date) else pd.NaT
+    region_key = normalize_region_for_feature(report["region"])
+
+    confirmed = pd.to_numeric(report.get("confirmed", 0), errors="coerce")
+    suspected = pd.to_numeric(report.get("suspected", 0), errors="coerce")
+    deaths = pd.to_numeric(report.get("deaths", 0), errors="coerce")
+    rainfall_avg = pd.to_numeric(report.get("rainfall_avg", 0), errors="coerce")
+    temperature_avg = pd.to_numeric(report.get("temperature_avg", 0), errors="coerce")
+    humidity_avg = pd.to_numeric(report.get("humidity_avg", 0), errors="coerce")
+
+    confirmed = 0 if pd.isna(confirmed) else confirmed
+    suspected = 0 if pd.isna(suspected) else suspected
+    deaths = 0 if pd.isna(deaths) else deaths
+    rainfall_avg = 0 if pd.isna(rainfall_avg) else rainfall_avg
+    temperature_avg = 0 if pd.isna(temperature_avg) else temperature_avg
+    humidity_avg = 0 if pd.isna(humidity_avg) else humidity_avg
+
+    total_cases = confirmed + suspected
+    log_cases = np.log1p(total_cases)
+    history = prepare_history_for_features(history_df)
+    region_history = history[history["region_key"] == region_key].copy()
+
+    previous_month = report_month - pd.DateOffset(months=1) if not pd.isna(report_month) else pd.NaT
+    two_months_ago = report_month - pd.DateOffset(months=2) if not pd.isna(report_month) else pd.NaT
+
+    def get_history_value(month_date, column_name):
+        if pd.isna(month_date) or region_history.empty:
+            return 0
+        matches = region_history[region_history["month_date"] == month_date]
+        if matches.empty:
+            return 0
+        return float(matches.sort_values("month_date").iloc[-1][column_name])
+
+    feature_row = {
+        "log_cases": log_cases,
+        "deaths": deaths,
+        "rainfall_avg": rainfall_avg,
+        "temperature_avg": temperature_avg,
+        "humidity_avg": humidity_avg,
+        "log_cases_lag1": get_history_value(previous_month, "log_cases"),
+        "log_cases_lag2": get_history_value(two_months_ago, "log_cases"),
+        "rainfall_lag1": get_history_value(previous_month, "rainfall_avg"),
+    }
+
+    for region_col in region_cols:
+        encoded_region = normalize_region_for_feature(region_col.replace("Region_", "", 1))
+        feature_row[region_col] = 1 if encoded_region == region_key else 0
+
+    return pd.DataFrame([feature_row], columns=list(feature_row.keys()))
+
+
+@st.cache_resource
+def load_cholera_risk_model():
+    if joblib is None:
+        raise RuntimeError("joblib is not installed. Run: pip install joblib")
+    return joblib.load("cholera_risk_model.pkl")
+
+
+@st.cache_data(ttl=3600)
+def load_model_history_and_regions():
+    history_path = "monthly_cholera_model_dataset_onehot.csv"
+    history_df = pd.read_csv(history_path) if os.path.exists(history_path) else pd.DataFrame()
+    region_cols = [column for column in history_df.columns if column.startswith("Region_")]
+    return history_df, region_cols
+
+
+def predict_occurrence_risk(report, history_df, region_cols):
+    model = load_cholera_risk_model()
+    model_features = getattr(model, "feature_names_in_", None)
+    if not region_cols and model_features is not None:
+        region_cols = [feature for feature in model_features if str(feature).startswith("Region_")]
+
+    feature_row = build_features(report, history_df, region_cols)
+    if model_features is not None:
+        feature_row = feature_row.reindex(columns=list(model_features), fill_value=0)
+
+    prediction = int(model.predict(feature_row)[0])
+    return RISK_LABELS.get(prediction, "Unknown")
+
+
+def standardize_mongo_records(raw_df: pd.DataFrame) -> pd.DataFrame:
+    # Map flexible Mongo fields into the dashboard's canonical schema.
     if raw_df.empty:
-        return pd.DataFrame(columns=["date", "region_en", "district", "disease_type", "sCh", "cCh", "deaths"])
+        return pd.DataFrame(columns=["date", "region_en", "district", "sCh", "cCh", "deaths"])
 
     region_col = pick_first_existing(raw_df, ["region", "region_en", "Region", "regionName"])
     district_col = pick_first_existing(raw_df, ["district", "district_name", "District"])
     date_col = pick_first_existing(raw_df, ["date", "report_date", "createdAt", "created_at", "timestamp", "TL"])
-    disease_col = pick_first_existing(raw_df, ["pandemic", "disease_type", "disease", "diseaseType", "condition", "pathology"])
     suspected_col = pick_first_existing(raw_df, ["suspected", "sCh", "suspectedCases"])
     confirmed_col = pick_first_existing(raw_df, ["confirmed", "cCh", "confirmedCases"])
     deaths_col = pick_first_existing(raw_df, ["deaths", "Deaths"])
 
-    if region_col is None:
-        raw_df["region_en"] = "Unknown"
-    else:
-        raw_df["region_en"] = raw_df[region_col].astype(str).replace("nan", "Unknown")
-
-    if district_col is None:
-        raw_df["district"] = "Unknown"
-    else:
-        raw_df["district"] = raw_df[district_col].astype(str).replace("nan", "Unknown")
-
-    if date_col is None:
-        raw_df["date"] = pd.Timestamp.utcnow()
-    else:
-        raw_df["date"] = pd.to_datetime(raw_df[date_col], errors="coerce")
-
-    if disease_col is None:
-        raw_df["disease_type"] = "Unknown"
-    else:
-        raw_df["disease_type"] = raw_df[disease_col].astype(str).replace("nan", "Unknown").str.strip()
-        raw_df.loc[raw_df["disease_type"] == "", "disease_type"] = "Unknown"
-    raw_df["disease_type"] = raw_df["disease_type"].apply(canonicalize_disease_name)
+    raw_df["region_en"] = "Unknown" if region_col is None else raw_df[region_col].astype(str).replace("nan", "Unknown")
+    raw_df["district"] = "Unknown" if district_col is None else raw_df[district_col].astype(str).replace("nan", "Unknown")
+    raw_df["date"] = pd.Timestamp.utcnow() if date_col is None else pd.to_datetime(raw_df[date_col], errors="coerce")
 
     raw_df["sCh"] = pd.to_numeric(raw_df[suspected_col], errors="coerce").fillna(0) if suspected_col else 0
     raw_df["cCh"] = pd.to_numeric(raw_df[confirmed_col], errors="coerce").fillna(0) if confirmed_col else 0
     raw_df["deaths"] = pd.to_numeric(raw_df[deaths_col], errors="coerce").fillna(0) if deaths_col else 0
 
-    result = raw_df[["date", "region_en", "district", "disease_type", "sCh", "cCh", "deaths"]].copy()
+    result = raw_df[["date", "region_en", "district", "sCh", "cCh", "deaths"]].copy()
     result["date"] = pd.to_datetime(result["date"], errors="coerce")
     result["year"] = result["date"].dt.year
     result["region_norm"] = normalize_region_name(result["region_en"])
     return result
 
-@st.cache_data(ttl=3600)
-def load_region_geojson(path):
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
 
-def build_geo_mapping(geojson_obj):
-    mapping = {}
-    for feature in geojson_obj.get("features", []):
-        shape_name = feature.get("properties", {}).get("shapeName")
-        if shape_name:
-            mapping[normalize_single_region_name(shape_name)] = shape_name
+def build_live_regional_monthly_environment_table(
+    live_region_df: pd.DataFrame,
+    live_history_df: pd.DataFrame | None = None,
+    latest_per_region: bool = False,
+) -> pd.DataFrame:
+    # Build one row per region/month for the risk table. The ensemble feature
+    # pipeline handles environmental values separately, so this table should not
+    # block on NASA API calls.
+    env_source = live_region_df.dropna(subset=["date"]).copy()
+    if env_source.empty:
+        return pd.DataFrame()
 
-    aliases = {
-        "adamawa": "Adamaoua",
-        "farnorth": "Far North",
-        "northwest": "North-West",
-        "southwest": "South-West",
-    }
-    for norm_name, shape_name in aliases.items():
-        if shape_name in [f.get("properties", {}).get("shapeName") for f in geojson_obj.get("features", [])]:
-            mapping[norm_name] = shape_name
-    return mapping
+    env_source["report_month"] = pd.to_datetime(env_source["date"], errors="coerce").dt.to_period("M").astype(str)
+    env_source["report_month"] = env_source["report_month"].replace("NaT", pd.NA)
+    env_source = env_source.dropna(subset=["report_month"])
+    if env_source.empty:
+        return pd.DataFrame()
+
+    monthly_env = (
+        env_source.groupby(["region_en", "report_month"], as_index=False)[["cCh", "sCh", "deaths"]]
+        .sum()
+        .sort_values(["report_month", "region_en"])
+    )
+    if monthly_env.empty:
+        return pd.DataFrame()
+
+    if latest_per_region:
+        monthly_env = (
+            monthly_env.sort_values(["region_en", "report_month"])
+            .groupby("region_en", as_index=False)
+            .tail(1)
+            .sort_values("region_en")
+        )
+
+    def predict_row_output(row):
+        try:
+            prediction_result = predict_next_month_risk(row["region_en"])
+            prediction = prediction_result["prediction"]
+            return pd.Series(
+                {
+                    "OutbreakRisk_NextMonth": ENSEMBLE_RISK_LABELS.get(prediction, str(prediction)),
+                    "OutbreakRisk_Class": prediction,
+                    "Prediction_Error": "",
+                }
+            )
+        except Exception as exc:
+            return pd.Series(
+                {
+                    "OutbreakRisk_NextMonth": "Unavailable",
+                    "OutbreakRisk_Class": pd.NA,
+                    "Prediction_Error": str(exc),
+                }
+            )
+
+    monthly_env[["OutbreakRisk_NextMonth", "OutbreakRisk_Class", "Prediction_Error"]] = monthly_env.apply(predict_row_output, axis=1)
+    return monthly_env
+
 
 @st.cache_data(ttl=300)
 def load_mongo_live_data():
+    # Load reports from MongoDB, trying preferred databases/collections first.
     if MongoClient is None:
         raise RuntimeError("pymongo is not installed. Run: pip install pymongo")
 
     client = MongoClient(MONGODB_URI, server_api=ServerApi("1"))
     client.admin.command("ping")
 
-    db_names = client.list_database_names()
     preferred_dbs = [
         "cholera_monitoring_dashboard",
         "cholera_monitoring_dashboad_project",
@@ -157,6 +525,7 @@ def load_mongo_live_data():
     ]
     preferred_collections = ["reports", "report", "cholera_reports", "records"]
 
+    db_names = client.list_database_names()
     ordered_dbs = [name for name in preferred_dbs if name in db_names] + [
         name for name in db_names if name not in preferred_dbs and name not in {"admin", "local", "config"}
     ]
@@ -172,646 +541,467 @@ def load_mongo_live_data():
             docs = list(db[col_name].find({}, {"_id": 0}).limit(10000))
             if not docs:
                 continue
-
             mongo_df = standardize_mongo_records(pd.DataFrame(docs))
             if not mongo_df.empty and mongo_df[["sCh", "cCh", "deaths"]].sum().sum() > 0:
                 return mongo_df, f"{db_name}.{col_name}"
 
-    return pd.DataFrame(columns=["date", "region_en", "district", "disease_type", "sCh", "cCh", "deaths", "year", "region_norm"]), ""
+    return pd.DataFrame(columns=["date", "region_en", "district", "sCh", "cCh", "deaths", "year", "region_norm"]), ""
 
-# -------------------------------------------------------
-# Coordinates for all 10 regions of Cameroon (lat, lon)
-# -------------------------------------------------------
-REGION_COORDS = {
-    "Adamawa": (7.3167, 13.5833), "Adamaoua": (7.3167, 13.5833),
-    "Centre": (3.8667, 11.5167), "Center": (3.8667, 11.5167),
-    "Yaounde": (3.8667, 11.5167), "Yaoundé": (3.8667, 11.5167),
-    "East": (4.5833, 13.6833), "Est": (4.5833, 13.6833), "Bertoua": (4.5833, 13.6833),
-    "Far North": (10.5959, 14.3159), "Extreme Nord": (10.5959, 14.3159),
-    "Extrême-Nord": (10.5959, 14.3159), "Maroua": (10.5959, 14.3159),
-    "Littoral": (4.0500, 9.7000), "Douala": (4.0500, 9.7000),
-    "North": (9.3000, 13.3833), "Nord": (9.3000, 13.3833), "Garoua": (9.3000, 13.3833),
-    "North West": (5.9631, 10.1597), "Northwest": (5.9631, 10.1597),
-    "Nord-Ouest": (5.9631, 10.1597), "Bamenda": (5.9631, 10.1597),
-    "South": (2.9000, 11.1500), "Sud": (2.9000, 11.1500), "Ebolowa": (2.9000, 11.1500),
-    "South West": (4.1527, 9.2403), "Southwest": (4.1527, 9.2403),
-    "Sud-Ouest": (4.1527, 9.2403), "Buea": (4.1527, 9.2403),
-    "Fako": (4.1527, 9.2403), "Meme": (4.5167, 9.3833),
-    "Manyu": (5.9333, 9.3667), "Ndian": (4.6667, 8.8333),
-    "Kupe-Muanenguba": (4.7833, 9.6833), "Lebialem": (5.5000, 9.9167),
-    "West": (5.4667, 10.4167), "Ouest": (5.4667, 10.4167), "Bafoussam": (5.4667, 10.4167),
-}
-DEFAULT_COORDS = (5.6968, 12.3547)
 
-def get_coords(region):
-    for key in REGION_COORDS:
+def get_coords(region: str):
+    # Resolve a region/district string to a representative map coordinate.
+    for key, value in REGION_COORDS.items():
         if key.lower() in region.lower() or region.lower() in key.lower():
-            return REGION_COORDS[key]
+            return value
     return DEFAULT_COORDS
 
+
 @st.cache_data(ttl=3600)
-def fetch_nasa_conditions(lat, lon):
-    end_dt   = datetime.today() - timedelta(days=2)
-    start_dt = end_dt - timedelta(days=29)
+def fetch_nasa_conditions_for_date(lat, lon, report_date_str):
+    # Fetch NASA POWER daily rainfall, temperature, and humidity for one date.
+    report_dt = pd.to_datetime(report_date_str, errors="coerce")
+    if pd.isna(report_dt):
+        return {"rainfall_avg": None, "temp_avg": None, "humidity_avg": None, "date": None}
+
+    date_token = report_dt.strftime("%Y%m%d")
     url = (
         "https://power.larc.nasa.gov/api/temporal/daily/point?"
-        f"parameters=PRECTOT,T2M,RH2M&start={start_dt.strftime('%Y%m%d')}&end={end_dt.strftime('%Y%m%d')}"
+        f"parameters=PRECTOT,T2M,RH2M&start={date_token}&end={date_token}"
         f"&latitude={lat}&longitude={lon}&community=AG&format=JSON"
     )
     resp = requests.get(url, timeout=20)
     resp.raise_for_status()
-    data = resp.json()["properties"]["parameter"]
-    rain = [v for v in data["PRECTOT"].values() if v != -999]
-    temp = [v for v in data["T2M"].values()     if v != -999]
-    hum  = [v for v in data["RH2M"].values()    if v != -999]
+
+    data = resp.json().get("properties", {}).get("parameter", {})
+    rain_raw = data.get("PRECTOT", {}).get(date_token, -999)
+    temp_raw = data.get("T2M", {}).get(date_token, -999)
+    hum_raw = data.get("RH2M", {}).get(date_token, -999)
+
     return {
-        "rainfall_avg": sum(rain) / len(rain) if rain else None,
-        "temp_avg":     sum(temp) / len(temp) if temp else None,
-        "humidity_avg": sum(hum)  / len(hum)  if hum  else None,
-        "start": start_dt.strftime("%Y-%m-%d"),
-        "end":   end_dt.strftime("%Y-%m-%d"),
+        "rainfall_avg": None if rain_raw == -999 else float(rain_raw),
+        "temp_avg": None if temp_raw == -999 else float(temp_raw),
+        "humidity_avg": None if hum_raw == -999 else float(hum_raw),
+        "date": report_dt.strftime("%Y-%m-%d"),
     }
 
-# -------------------------------------------------------
-# Sidebar
-# -------------------------------------------------------
-regions = ["All Regions"] + sorted(df['region_en'].dropna().unique().tolist())
-years   = sorted(df['year'].dropna().unique())
 
-data_mode = st.sidebar.radio(
-    "Data Mode",
-    ["Historical Data", "Live Data"],
-    index=0
-)
+@st.cache_data(ttl=3600)
+def fetch_nasa_conditions_for_month(lat, lon, report_month_str):
+    # Fetch NASA POWER values once for the full month and return monthly averages.
+    month_dt = pd.to_datetime(f"{report_month_str}-01", errors="coerce")
+    if pd.isna(month_dt):
+        return {"rainfall_avg": None, "temp_avg": None, "humidity_avg": None, "month": None}
 
-if data_mode == "Historical Data":
-    historical_mode = st.sidebar.radio("Historical Data", ["By Year", "All Years Trend"], index=0)
-    view_mode = historical_mode
-else:
-    view_mode = "Live Data"
-
-if view_mode != "Live Data":
-    selected_region = st.sidebar.selectbox("Select Region", regions)
-    if selected_region == "All Regions":
-        selected_region_norm = None
-        district_options = ["All Districts"]
-        selected_district = st.sidebar.selectbox("Select District", district_options, disabled=True)
-    else:
-        selected_region_norm = normalize_region_name(pd.Series([selected_region])).iloc[0]
-        district_options = sorted(
-            district_df[district_df['region_norm'] == selected_region_norm]['district'].dropna().unique().tolist()
-        )
-        district_options = ["All Districts"] + district_options
-        selected_district = st.sidebar.selectbox("Select District", district_options)
-
-    if selected_district == "All Districts":
-        selected_env = st.sidebar.multiselect(
-            "Select Environmental Variables",
-            ["rainfall_avg", "humidity_avg", "temp_avg"],
-            default=["rainfall_avg"]
-        )
-    else:
-        selected_env = []
-
-    chart_type = st.sidebar.radio(
-        "Chart Type",
-        ["Line", "Bar", "Pie"],
-        index=0
+    start_token = month_dt.strftime("%Y%m%d")
+    end_token = month_dt.to_period("M").end_time.strftime("%Y%m%d")
+    url = (
+        "https://power.larc.nasa.gov/api/temporal/daily/point?"
+        f"parameters=PRECTOT,T2M,RH2M&start={start_token}&end={end_token}"
+        f"&latitude={lat}&longitude={lon}&community=AG&format=JSON"
     )
+    resp = requests.get(url, timeout=20)
+    resp.raise_for_status()
 
-if view_mode == "By Year":
-    selected_year = st.sidebar.selectbox("Select Year", years)
-    if selected_region == "All Regions":
-        case_filtered_df = district_df[district_df['year'] == selected_year]
-    else:
-        case_filtered_df = district_df[
-            (district_df['region_norm'] == selected_region_norm) &
-            (district_df['year'] == selected_year)
+    data = resp.json().get("properties", {}).get("parameter", {})
+
+    def monthly_average(parameter_name):
+        values = [
+            float(value)
+            for value in data.get(parameter_name, {}).values()
+            if value != -999
         ]
+        return sum(values) / len(values) if values else None
 
-    if selected_district != "All Districts":
-        case_filtered_df = case_filtered_df[case_filtered_df['district'] == selected_district]
+    return {
+        "rainfall_avg": monthly_average("PRECTOT"),
+        "temp_avg": monthly_average("T2M"),
+        "humidity_avg": monthly_average("RH2M"),
+        "month": month_dt.strftime("%Y-%m"),
+    }
 
-    if selected_district == "All Districts":
-        if selected_region == "All Regions":
-            filtered_df = df[df['year'] == selected_year].sort_values('TL')
-        else:
-            filtered_df = df[
-                (df['region_norm'] == selected_region_norm) & (df['year'] == selected_year)
-            ].sort_values('TL')
-    else:
-        if selected_region == "All Regions":
-            filtered_df = district_df[
-                (district_df['district'] == selected_district) &
-                (district_df['year'] == selected_year)
-            ].sort_values('TL')
-        else:
-            filtered_df = district_df[
-                (district_df['region_norm'] == selected_region_norm) &
-                (district_df['district'] == selected_district) &
-                (district_df['year'] == selected_year)
-            ].sort_values('TL')
-    title_suffix  = f" - {int(selected_year)}"
-elif view_mode == "All Years Trend":
-    selected_year = None
-    if selected_region == "All Regions":
-        case_filtered_df = district_df.copy()
-    else:
-        case_filtered_df = district_df[
-            (district_df['region_norm'] == selected_region_norm)
-        ]
 
-    if selected_district != "All Districts":
-        case_filtered_df = case_filtered_df[case_filtered_df['district'] == selected_district]
+def classify_environmental_risk(rainfall_avg, humidity_avg, temp_avg):
+    # Assign a placeholder High/Medium/Low environmental risk label.
+    if rainfall_avg is None or humidity_avg is None or temp_avg is None:
+        return "Medium"
 
-    if selected_district == "All Districts":
-        if selected_region == "All Regions":
-            filtered_df = df.sort_values('TL')
-        else:
-            filtered_df = df[df['region_norm'] == selected_region_norm].sort_values('TL')
-    else:
-        if selected_region == "All Regions":
-            filtered_df = district_df[
-                (district_df['district'] == selected_district)
-            ].sort_values('TL')
-        else:
-            filtered_df = district_df[
-                (district_df['region_norm'] == selected_region_norm) &
-                (district_df['district'] == selected_district)
-            ].sort_values('TL')
-    title_suffix  = " - All Years Trend"
+    high_signals = 0
+    medium_signals = 0
 
-df['period'] = df['TL'].astype(str) + ' to ' + df['TR'].astype(str)
+    if rainfall_avg >= 15:
+        high_signals += 1
+    elif rainfall_avg >= 6:
+        medium_signals += 1
 
-# -------------------------------------------------------
-# Shared CSS
-# -------------------------------------------------------
-st.markdown("""
-    <style>
-    :root {
-        --blue-50: #f4f8ff;
-        --blue-100: #e6f0ff;
-        --blue-200: #cfe0ff;
-        --blue-400: #4f8cff;
-        --blue-600: #1e5fd8;
-        --blue-700: #184fb6;
-        --blue-900: #0f2d66;
-    }
-    .stApp {
-        background: linear-gradient(180deg, var(--blue-50) 0%, #ffffff 55%, var(--blue-50) 100%);
-    }
-    h1, h2, h3, .stMarkdown, .stCaption {
-        color: var(--blue-900);
-    }
-    section[data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #eaf3ff 0%, #dfefff 100%);
-        border-right: 1px solid var(--blue-200);
-    }
-    section[data-testid="stSidebar"] .stRadio label,
-    section[data-testid="stSidebar"] .stSelectbox label,
-    section[data-testid="stSidebar"] .stMultiSelect label {
-        color: var(--blue-700) !important;
-        font-weight: 600;
-    }
-    .stButton > button {
-        background: linear-gradient(180deg, var(--blue-400), var(--blue-600));
-        color: white;
-        border: 1px solid var(--blue-700);
-        border-radius: 10px;
-        font-weight: 600;
-    }
-    .stButton > button:hover {
-        background: linear-gradient(180deg, var(--blue-600), var(--blue-700));
-    }
-    [data-baseweb="select"] {
-        background-color: #eef5ff !important;
-        border: 1px solid var(--blue-200) !important;
-        border-radius: 10px !important;
-    }
-    .card {
-        border: 2px solid #1E90FF;
-        border-radius: 10px;
-        padding: 0px;
-        text-align: center;
-        transition: 0.3s;
-        height: 150px;
-        background: linear-gradient(180deg, #ffffff 0%, #eef5ff 100%);
-        display: flex;
-        flex-direction: column;
-        justify-content: left;
-        align-items: left;
-    }
-    .card:hover { background-color: #F0F8FF; box-shadow: 0px 4px 8px rgba(0,0,0,0.2); }
-    .card h3 { margin: 0; color: #1E90FF; }
-    .card p  { font-size: 22px; font-weight: bold; margin: 0px 0 0 0; }
-    .env-card {
-        border-radius: 12px;
-        padding: 16px 20px;
-        margin-bottom: 8px;
-        background: linear-gradient(180deg, #ffffff 0%, #eef5ff 100%);
-        border-left: 6px solid;
-        border-top: 1px solid #d8e8ff;
-        border-right: 1px solid #d8e8ff;
-        border-bottom: 1px solid #d8e8ff;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-    }
-    .env-card .label { font-size: 16px; font-weight: 600; color: #333; }
-    .env-card .value { font-size: 15px; color: #555; }
-    .env-card .badge {
-        font-size: 14px; font-weight: bold;
-        padding: 4px 14px; border-radius: 20px; color: white;
-    }
-    .risk-banner {
-        border-radius: 12px; padding: 18px 24px;
-        text-align: center; font-size: 20px;
-        font-weight: bold; color: white; margin-top: 12px;
-        box-shadow: 0 4px 16px rgba(24, 79, 182, 0.2);
-    }
-    /* Blue background for selected multiselect tags */
-    div[data-baseweb="tag"] {
-        background-color: #d9e8ff !important;
-        color: #0f2d66 !important;
-        border: 1px solid #a9c7ff !important;
-    }
-    </style>
-""", unsafe_allow_html=True)
+    if humidity_avg >= 80:
+        high_signals += 1
+    elif humidity_avg >= 65:
+        medium_signals += 1
 
-st.title("Cameroon Cholera Monitoring Dashboard")
+    if 24 <= temp_avg <= 34:
+        high_signals += 1
+    elif 20 <= temp_avg < 24 or 34 < temp_avg <= 37:
+        medium_signals += 1
 
-# -------------------------------------------------------
-# VIEW: By Year / All Years Trend
-# -------------------------------------------------------
-if view_mode in ["By Year", "All Years Trend"]:
-    st.subheader(f"{selected_region} - {selected_district}{title_suffix}")
+    if high_signals >= 2:
+        return "High"
+    if high_signals == 1 or medium_signals >= 2:
+        return "Medium"
+    return "Low"
 
-    if case_filtered_df.empty:
-        st.warning("No records found for the selected district.")
-        st.stop()
+def classify_cfr_risk(cfr_value):
+    # Classify CFR risk using WHO-inspired thresholds: <1 low, 1-3 medium, >=3 high.
+    if cfr_value >= 3:
+        return "High"
+    if cfr_value >= 1:
+        return "Medium"
+    return "Low"
 
-    # Cases/deaths should always come from district-level data
-    case_plot_df = case_filtered_df.groupby('TL', as_index=False)[['cCh', 'sCh', 'deaths']].sum().sort_values('TL')
 
-    total_confirmed_hist = int(case_filtered_df['cCh'].sum())
-    total_suspected_hist = int(case_filtered_df['sCh'].sum())
-    total_deaths_hist = int(case_filtered_df['deaths'].sum())
-    cfr_hist = (total_deaths_hist / total_confirmed_hist * 100) if total_confirmed_hist > 0 else 0
+def apply_chart_layout(fig, height=None):
+    # Apply the shared dashboard visual style to Plotly figures.
+    layout = {
+        "plot_bgcolor": "#f7fbff",
+        "paper_bgcolor": "#ffffff",
+        "title_font_color": "#184fb6",
+        "xaxis": {"gridcolor": "#dce9ff"},
+        "yaxis": {"gridcolor": "#dce9ff"},
+    }
+    if height is not None:
+        layout["height"] = height
+    fig.update_layout(**layout)
+
+
+def render_metric_cards(confirmed, suspected, deaths, cfr):
+    # Render KPI cards with totals and a color-coded CFR badge.
+    cfr_risk = classify_cfr_risk(cfr)
+    cfr_risk_color = RISK_COLOR_MAP.get(cfr_risk, "#455a64")
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.markdown(f"""<div class="card"><h3>Confirmed Cases</h3>
-            <p>{total_confirmed_hist}</p></div>""", unsafe_allow_html=True)
+        st.markdown(f"""<div class=\"card\"><h3>Confirmed Cases</h3><p>{int(confirmed):,}</p></div>""", unsafe_allow_html=True)
     with col2:
-        st.markdown(f"""<div class="card"><h3>Suspected Cases</h3>
-            <p>{total_suspected_hist}</p></div>""", unsafe_allow_html=True)
+        st.markdown(f"""<div class=\"card\"><h3>Suspected Cases</h3><p>{int(suspected):,}</p></div>""", unsafe_allow_html=True)
     with col3:
-        st.markdown(f"""<div class="card"><h3>Total Deaths</h3>
-            <p>{total_deaths_hist}</p></div>""", unsafe_allow_html=True)
+        st.markdown(f"""<div class=\"card\"><h3>Total Deaths</h3><p>{int(deaths):,}</p></div>""", unsafe_allow_html=True)
     with col4:
-        st.markdown(f"""<div class="card"><h3>CFR (%)</h3>
-            <p>{cfr_hist:.2f}</p></div>""", unsafe_allow_html=True)
+        st.markdown(
+            f"""
+            <div class=\"card\">
+                <h3>CFR (%)</h3>
+                <p style=\"margin-bottom:8px;\">{cfr:.2f}</p>
+                <div style=\"display:flex; align-items:center; justify-content:center; gap:8px; flex-wrap:wrap;\">
+                    <span style=\"background:{cfr_risk_color}; color:#fff; padding:3px 9px; border-radius:999px; font-size:0.78rem; font-weight:700;\">
+                        {cfr_risk}
+                    </span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    CMAP = {"Confirmed": "#1e5fd8", "Suspected": "#f9a825", "Deaths": "#d32f2f"}
-    chart_title = f"Cholera Cases in {selected_region} - {selected_district}{title_suffix}"
+
+def render_main_historical_chart(case_filtered_df, chart_type, chart_title):
+    # Render the primary cases chart (Line/Bar/Pie) for historical slices.
+    case_plot_df = case_filtered_df.groupby("TL", as_index=False)[["cCh", "sCh", "deaths"]].sum().sort_values("TL")
 
     if chart_type == "Line":
         melted = case_plot_df.melt(
             id_vars="TL",
             value_vars=["cCh", "sCh", "deaths"],
-            var_name="Metric", value_name="Count"
+            var_name="Metric",
+            value_name="Count",
         )
         melted["Metric"] = melted["Metric"].map({"cCh": "Confirmed", "sCh": "Suspected", "deaths": "Deaths"})
-        fig_main = px.line(
-            melted, x="TL", y="Count", color="Metric",
-            title=chart_title, markers=True,
+        fig = px.line(
+            melted,
+            x="TL",
+            y="Count",
+            color="Metric",
+            title=chart_title,
+            markers=True,
             labels={"TL": "Time Period Start", "Count": "Cases"},
-            color_discrete_map=CMAP
-        )
-        fig_main.update_layout(
-            plot_bgcolor="#f7fbff", paper_bgcolor="#ffffff",
-            title_font_color="#184fb6",
-            xaxis=dict(gridcolor="#dce9ff"), yaxis=dict(gridcolor="#dce9ff"),
-            legend_title_text=""
+            color_discrete_map=CMAP,
         )
     elif chart_type == "Bar":
         bar_df = case_plot_df.melt(
             id_vars="TL",
             value_vars=["cCh", "sCh", "deaths"],
-            var_name="Metric", value_name="Count"
+            var_name="Metric",
+            value_name="Count",
         )
         bar_df["Metric"] = bar_df["Metric"].map({"cCh": "Confirmed", "sCh": "Suspected", "deaths": "Deaths"})
         bar_df["TL"] = bar_df["TL"].dt.strftime("%Y-%m-%d")
-        fig_main = px.bar(
-            bar_df, x="TL", y="Count", color="Metric", barmode="group",
+        fig = px.bar(
+            bar_df,
+            x="TL",
+            y="Count",
+            color="Metric",
+            barmode="group",
             title=chart_title,
             labels={"TL": "Time Period Start", "Count": "Number of Records"},
-            color_discrete_map=CMAP
+            color_discrete_map=CMAP,
         )
-        fig_main.update_layout(
-            plot_bgcolor="#f7fbff", paper_bgcolor="#ffffff",
-            title_font_color="#184fb6",
-            xaxis=dict(gridcolor="#dce9ff"), yaxis=dict(gridcolor="#dce9ff"),
-            legend_title_text="",
-            height=520,
-            bargap=0.08,
-            bargroupgap=0.03
+        fig.update_layout(bargap=0.08, bargroupgap=0.03)
+    else:
+        pie_df = pd.DataFrame(
+            {
+                "Metric": ["Confirmed", "Suspected", "Deaths"],
+                "Count": [
+                    int(case_filtered_df["cCh"].sum()),
+                    int(case_filtered_df["sCh"].sum()),
+                    int(case_filtered_df["deaths"].sum()),
+                ],
+            }
         )
-    else:  # Pie
-        pie_df = pd.DataFrame({
-            "Metric": ["Confirmed", "Suspected", "Deaths"],
-            "Count": [
-                int(case_filtered_df["cCh"].sum()),
-                int(case_filtered_df["sCh"].sum()),
-                int(case_filtered_df["deaths"].sum()),
-            ]
-        })
         pie_df = pie_df[pie_df["Count"] > 0]
         if pie_df.empty:
             st.info("No data to display as a pie chart for this selection.")
-            fig_main = None
-        else:
-            fig_main = px.pie(
-                pie_df, values="Count", names="Metric",
-                title=f"Distribution of Cholera Metrics in {selected_region} - {selected_district}{title_suffix}",
-                color="Metric", color_discrete_map=CMAP
-            )
-            fig_main.update_traces(textposition="inside", textinfo="percent+label")
-            fig_main.update_layout(
-                paper_bgcolor="#ffffff",
-                title_font_color="#184fb6",
-                legend_title_text=""
-            )
+            return
+        fig = px.pie(
+            pie_df,
+            values="Count",
+            names="Metric",
+            title=chart_title,
+            color="Metric",
+            color_discrete_map=CMAP,
+        )
+        fig.update_traces(textposition="inside", textinfo="percent+label")
 
-    if fig_main is not None:
-        st.plotly_chart(fig_main, use_container_width=True)
+    apply_chart_layout(fig, height=520 if chart_type == "Bar" else None)
+    fig.update_layout(legend_title_text="")
+    st.plotly_chart(fig, use_container_width=True)
 
-    if selected_district == "All Districts":
-        for var in selected_env:
-            if chart_type == "Bar":
-                env_bar_df = filtered_df.copy()
-                env_bar_df["TL"] = env_bar_df["TL"].dt.strftime("%Y-%m-%d")
-                fig_env = px.bar(
-                    env_bar_df, x="TL", y=var,
-                    title=f"{var} in {selected_region}{title_suffix}",
-                    labels={"TL": "Time Period Start"},
-                    color_discrete_sequence=["#1e5fd8"]
-                )
-            elif chart_type == "Pie":
-                # Pie doesn't suit time-series env data; fall back to bar
-                fig_env = px.bar(
-                    filtered_df, x="TL", y=var,
-                    title=f"{var} in {selected_region}{title_suffix}",
-                    labels={"TL": "Time Period Start"},
-                    color_discrete_sequence=["#1e5fd8"]
-                )
+
+def get_historical_selection(sidebar_regions, years):
+    # Collect sidebar filters for historical dashboards.
+    selected_region = st.sidebar.selectbox("Select Region", sidebar_regions)
+    selected_region_norm = None if selected_region == "All Regions" else normalize_region_name(pd.Series([selected_region])).iloc[0]
+
+    if selected_region == "All Regions":
+        selected_district = st.sidebar.selectbox("Select District", ["All Districts"], disabled=True)
+    else:
+        district_options = sorted(
+            district_df[district_df["region_norm"] == selected_region_norm]["district"].dropna().unique().tolist()
+        )
+        selected_district = st.sidebar.selectbox("Select District", ["All Districts"] + district_options)
+
+    chart_type = st.sidebar.radio("Chart Type", ["Line", "Bar", "Pie"], index=0)
+    selected_year = st.sidebar.selectbox("Select Year", years) if view_mode == "By Year" else None
+    return selected_region, selected_region_norm, selected_district, chart_type, selected_year
+
+
+def filter_historical_data(view_mode, selected_region, selected_region_norm, selected_district, selected_year):
+    # Build historical case dataset from selected filters.
+    if view_mode == "By Year":
+        if selected_district == "All Districts":
+            if selected_region == "All Regions":
+                case_filtered_df = aggregate_regional_all_regions_by_tl(regional_env_df[regional_env_df["year"] == selected_year])
             else:
-                fig_env = px.line(
-                    filtered_df, x="TL", y=var,
-                    title=f"{var} in {selected_region}{title_suffix}",
-                    markers=True, color_discrete_sequence=["blue"],
-                    labels={"TL": "Time Period Start"}
-                )
-                fig_env.update_traces(line_color="#1e5fd8", marker_color="#4f8cff")
-            fig_env.update_layout(
-                plot_bgcolor="#f7fbff",
-                paper_bgcolor="#ffffff",
-                title_font_color="#184fb6",
-                xaxis=dict(gridcolor="#dce9ff"),
-                yaxis=dict(gridcolor="#dce9ff"),
-                height=460,
-                bargap=0.08,
-                bargroupgap=0.03
-            )
-            st.plotly_chart(fig_env)
+                case_filtered_df = regional_env_df[
+                    (regional_env_df["region_norm"] == selected_region_norm) &
+                    (regional_env_df["year"] == selected_year)
+                ].sort_values("TL")
+        else:
+            base_df = district_df if selected_region == "All Regions" else district_df[district_df["region_norm"] == selected_region_norm]
+            case_filtered_df = base_df[base_df["year"] == selected_year]
+            case_filtered_df = case_filtered_df[case_filtered_df["district"] == selected_district]
+        title_suffix = f" - {int(selected_year)}"
+    else:
+        if selected_district == "All Districts":
+            if selected_region == "All Regions":
+                case_filtered_df = aggregate_regional_all_regions_by_tl(regional_env_df)
+            else:
+                case_filtered_df = regional_env_df[regional_env_df["region_norm"] == selected_region_norm].sort_values("TL")
+        else:
+            base_df = district_df if selected_region == "All Regions" else district_df[district_df["region_norm"] == selected_region_norm]
+            case_filtered_df = base_df[base_df["district"] == selected_district]
+        title_suffix = " - All Years Trend"
 
-        for var in selected_env:
-            fig_scatter = px.scatter(
-                filtered_df, x=var, y="cCh",
-                title=f"Confirmed Cases vs {var} in {selected_region}{title_suffix}",
-                trendline="ols", labels={"cCh": "Confirmed Cases"}
-            )
-            fig_scatter.update_traces(marker_color="#4f8cff")
-            fig_scatter.update_layout(
-                plot_bgcolor="#f7fbff",
-                paper_bgcolor="#ffffff",
-                title_font_color="#184fb6",
-                xaxis=dict(gridcolor="#dce9ff"),
-                yaxis=dict(gridcolor="#dce9ff")
-            )
-            st.plotly_chart(fig_scatter)
+    return case_filtered_df, title_suffix
 
-# -------------------------------------------------------
-# VIEW: Live Data — all regions
-# -------------------------------------------------------
-else:
-    st.subheader("Live Cholera Reports — MongoDB")
+
+def render_historical_dashboard(view_mode, regions, years):
+    # Render the complete historical dashboard from filter to charts.
+    selected_region, selected_region_norm, selected_district, chart_type, selected_year = get_historical_selection(regions, years)
+    case_filtered_df, title_suffix = filter_historical_data(
+        view_mode,
+        selected_region,
+        selected_region_norm,
+        selected_district,
+        selected_year,
+    )
+
+    st.subheader(f"{selected_region} - {selected_district}{title_suffix}")
+    if case_filtered_df.empty:
+        st.warning("No records found for the selected district.")
+        return
+
+    total_confirmed = int(case_filtered_df["cCh"].sum())
+    total_suspected = int(case_filtered_df["sCh"].sum())
+    total_deaths = int(case_filtered_df["deaths"].sum())
+    cfr = (total_deaths / total_confirmed * 100) if total_confirmed > 0 else 0
+
+    render_metric_cards(total_confirmed, total_suspected, total_deaths, cfr)
+
+    chart_title = f"Cholera Cases in {selected_region} - {selected_district}{title_suffix}"
+    if chart_type == "Pie":
+        chart_title = f"Distribution of Cholera Metrics in {selected_region} - {selected_district}{title_suffix}"
+    render_main_historical_chart(case_filtered_df, chart_type, chart_title)
+
+    hotspot_year = selected_year if view_mode == "By Year" else None
+    if selected_region == "All Regions":
+        st.subheader("Regional Cholera Hotspot Map")
+        control_col, map_col = st.columns([1, 5])
+        with control_col:
+            hotspot_metric = st.radio(
+                "Hotspot Metric",
+                ["sCh", "cCh", "deaths", "cfr"],
+                index=1,
+                key=f"hotspot_metric_{'all_years' if hotspot_year is None else int(hotspot_year)}",
+            )
+        with map_col:
+            render_regional_hotspot_map(hotspot_year, hotspot_metric)
+
+    # Persist historical regional CFR hotspot table.
+    export_df = build_cfr_hotspot_data(regional_env_df, hotspot_year)
+    export_name = (
+        f"historical_cfr_hotspot_by_region_{int(hotspot_year)}.csv"
+        if hotspot_year is not None
+        else "historical_cfr_hotspot_by_region_all_years.csv"
+    )
+    export_df.to_csv(export_name, index=False)
+
+
+def render_live_dashboard():
+    # Render the complete dashboard sourced from MongoDB records.
+    st.subheader(" Cholera Reports - MongoDB(Demo)")
 
     rcol, _ = st.columns([1, 5])
     with rcol:
-        if st.button("Refresh Live Data"):
+        if st.button("Refresh Data"):
             st.cache_data.clear()
 
     try:
         live_df, source_collection = load_mongo_live_data()
     except Exception as exc:
         st.error(f"Unable to load MongoDB data: {exc}")
-        st.stop()
+        return
 
     if live_df.empty:
-        st.warning("No records were found in MongoDB collections for live visualization.")
-        st.stop()
+        st.warning("No records were found in MongoDB collections for visualization.")
+        return
 
     st.caption(f"Source: MongoDB ({source_collection})")
 
-    live_disease_options = sorted(
-        [
-            d
-            for d in live_df["disease_type"].dropna().astype(str).str.strip().unique().tolist()
-            if d and d.lower() not in {"unknown", "nan"}
-        ]
-    )
+    region_options = ["All Regions"] + sorted(live_df["region_en"].dropna().unique().tolist())
+    selected_region = st.sidebar.selectbox("Region", region_options)
 
-    if not live_disease_options:
-        st.warning("No valid disease/pandemic values found in MongoDB records.")
-        st.stop()
-
-    selected_disease = st.sidebar.selectbox("Disease Type", live_disease_options)
-    disease_filtered = live_df[live_df["disease_type"] == selected_disease].copy()
-
-    if disease_filtered.empty:
-        st.warning(f"No MongoDB records found for {selected_disease}.")
-        st.stop()
-
-    region_options_live = ["All Regions"] + sorted(disease_filtered["region_en"].dropna().unique().tolist())
-    selected_live_region = st.sidebar.selectbox("Region", region_options_live)
-
-    if selected_live_region == "All Regions":
-        region_filtered = disease_filtered.copy()
+    if selected_region == "All Regions":
+        region_filtered = live_df.copy()
+        selected_district = st.sidebar.selectbox("District", ["All Districts"], disabled=True)
     else:
-        selected_live_norm = normalize_region_name(pd.Series([selected_live_region])).iloc[0]
-        region_filtered = disease_filtered[disease_filtered["region_norm"] == selected_live_norm].copy()
+        selected_live_norm = normalize_region_name(pd.Series([selected_region])).iloc[0]
+        region_filtered = live_df[live_df["region_norm"] == selected_live_norm].copy()
+        district_options = ["All Districts"] + sorted(region_filtered["district"].dropna().unique().tolist())
+        selected_district = st.sidebar.selectbox("District", district_options)
 
-    if selected_live_region == "All Regions":
-        district_options_live = ["All Districts"]
-        selected_live_district = st.sidebar.selectbox(
-            "District",
-            district_options_live,
-            disabled=True
-        )
-    else:
-        district_options_live = ["All Districts"] + sorted(
-            region_filtered["district"].dropna().unique().tolist()
-        )
-        selected_live_district = st.sidebar.selectbox("District", district_options_live)
-
-    if selected_live_district == "All Districts":
-        live_filtered = region_filtered.copy()
-    else:
-        live_filtered = region_filtered[region_filtered["district"] == selected_live_district].copy()
-
+    live_filtered = region_filtered if selected_district == "All Districts" else region_filtered[region_filtered["district"] == selected_district].copy()
     if live_filtered.empty:
-        st.warning("No MongoDB records for the selected live filters.")
-        st.stop()
+        st.warning("No MongoDB records for the selected filters.")
+        return
+
+    live_filtered["report_month"] = pd.to_datetime(live_filtered["date"], errors="coerce").dt.to_period("M").astype(str)
+    live_filtered["report_month"] = live_filtered["report_month"].replace("NaT", pd.NA)
+    live_month_options = sorted(live_filtered["report_month"].dropna().unique().tolist(), reverse=True)
+    if not live_month_options:
+        st.warning("No valid report dates are available in MongoDB records.")
+        return
+
+    live_month_labels = ["All Months"] + live_month_options
+    selected_live_month_label = st.sidebar.selectbox(" Report Month", live_month_labels, index=0)
+    live_chart_type = st.sidebar.radio(" Chart Type", ["Line", "Bar", "Pie"], index=0)
+
+    if selected_live_month_label != "All Months":
+        live_filtered = live_filtered[live_filtered["report_month"] == selected_live_month_label].copy()
+        if live_filtered.empty:
+            st.warning("No MongoDB records for the selected month.")
+            return
+
+    st.caption(
+        " month selected: All Months (aggregated)"
+        if selected_live_month_label == "All Months"
+        else f" month selected: {selected_live_month_label}"
+    )
 
     total_confirmed = int(live_filtered["cCh"].sum())
     total_suspected = int(live_filtered["sCh"].sum())
     total_deaths = int(live_filtered["deaths"].sum())
     cfr = (total_deaths / total_confirmed * 100) if total_confirmed > 0 else 0
+    render_metric_cards(total_confirmed, total_suspected, total_deaths, cfr)
 
-    k1, k2, k3, k4 = st.columns(4)
-    with k1:
-        st.markdown(f"""<div class="card"><h3>Confirmed Cases</h3>
-            <p>{total_confirmed:,}</p></div>""", unsafe_allow_html=True)
-    with k2:
-        st.markdown(f"""<div class="card"><h3>Suspected Cases</h3>
-            <p>{total_suspected:,}</p></div>""", unsafe_allow_html=True)
-    with k3:
-        st.markdown(f"""<div class="card"><h3>Total Deaths</h3>
-            <p>{total_deaths:,}</p></div>""", unsafe_allow_html=True)
-    with k4:
-        st.markdown(f"""<div class="card"><h3>CFR (%)</h3>
-            <p>{cfr:.2f}</p></div>""", unsafe_allow_html=True)
+    live_case_df = live_filtered.dropna(subset=["date"]).copy()
+    if not live_case_df.empty:
+        live_case_df["TL"] = pd.to_datetime(live_case_df["date"], errors="coerce")
+        live_title_suffix = " - All Months" if selected_live_month_label == "All Months" else f" - {selected_live_month_label}"
+        live_chart_title = f" Cholera Cases in {selected_region} - {selected_district}{live_title_suffix}"
+        if live_chart_type == "Pie":
+            live_chart_title = f"Distribution of Cholera Metrics in {selected_region} - {selected_district}{live_title_suffix}"
+        render_main_historical_chart(live_case_df, live_chart_type, live_chart_title)
 
-    region_agg = (
-        live_filtered.groupby("region_en", as_index=False)[["cCh", "sCh", "deaths"]]
-        .sum()
-        .sort_values("cCh", ascending=False)
+    env_table = build_live_regional_monthly_environment_table(
+        region_filtered,
+        live_history_df=region_filtered,
+        latest_per_region=True,
     )
-    region_agg["region_norm"] = normalize_region_name(region_agg["region_en"])
+    if not env_table.empty:
 
-    fig_region = px.bar(
-        region_agg,
-        x="region_en",
-        y=["cCh", "sCh", "deaths"],
-        barmode="group",
-        title="Regional Breakdown (Live MongoDB)",
-        labels={"region_en": "Region", "value": "Cases", "variable": "Metric"},
-        color_discrete_map={"cCh": "#1e5fd8", "sCh": "#f9a825", "deaths": "#d32f2f"}
+        def risk_cell_style(value):
+            color = RISK_COLOR_MAP.get(str(value), "#455a64")
+            return f"background-color: {color}; color: white; font-weight: 700"
+
+        st.subheader("Risk Prediction Table")
+        risk_table_columns = ["region_en", "report_month", "OutbreakRisk_Class", "OutbreakRisk_NextMonth"]
+        if "Prediction_Error" in env_table.columns and env_table["Prediction_Error"].astype(str).str.len().gt(0).any():
+            risk_table_columns.append("Prediction_Error")
+
+        display_env_table = env_table[risk_table_columns].rename(
+            columns={
+                "region_en": "Region",
+                "report_month": "Last Report Month",
+                "OutbreakRisk_Class": "Model Output",
+                "Prediction_Error": "Prediction Error",
+            }
+        )
+        st.dataframe(
+            display_env_table.style.applymap(risk_cell_style, subset=["OutbreakRisk_NextMonth"]),
+            use_container_width=True,
+        )
+
+
+def main():
+    # Application entrypoint: load data, configure mode, and render the active view.
+    global district_df, regional_env_df, view_mode
+
+    district_df, regional_env_df, years, regions = load_historical_data()
+
+    with open("app_styles.css", "r", encoding="utf-8") as css_file:
+        st.markdown(f"<style>{css_file.read()}</style>", unsafe_allow_html=True)
+
+    st.title("Cameroon Cholera Monitoring Dashboard")
+
+    data_mode = st.sidebar.radio("Data Mode", ["Historical Data", " Recent Data"], index=0)
+    view_mode = (
+        st.sidebar.radio("Historical Data", ["By Year", "All Years Trend"], index=0)
+        if data_mode == "Historical Data"
+        else " Data"
     )
-    fig_region.update_layout(
-        plot_bgcolor="#f7fbff",
-        paper_bgcolor="#ffffff",
-        title_font_color="#184fb6",
-        xaxis=dict(gridcolor="#dce9ff"),
-        yaxis=dict(gridcolor="#dce9ff")
-    )
-    st.plotly_chart(fig_region, use_container_width=True)
 
-    try:
-        region_geojson = load_region_geojson("geoBoundaries-CMR-ADM1.geojson")
-        geo_regions = []
-        for feature in region_geojson.get("features", []):
-            shape_name = feature.get("properties", {}).get("shapeName")
-            if shape_name:
-                geo_regions.append(
-                    {
-                        "shapeName": shape_name,
-                        "region_norm": normalize_single_region_name(shape_name),
-                    }
-                )
-
-        geo_df = pd.DataFrame(geo_regions)
-        if not geo_df.empty:
-            st.subheader("Complete Cameroon Map (GeoJSON ADM1)")
-            if pdk is None:
-                st.warning("pydeck is not installed. Run: pip install pydeck")
-            else:
-                geo_layer = pdk.Layer(
-                    "GeoJsonLayer",
-                    region_geojson,
-                    pickable=True,
-                    stroked=True,
-                    filled=True,
-                    extruded=False,
-                    get_fill_color=[219, 234, 254, 170],
-                    get_line_color=[24, 79, 182, 220],
-                    get_line_width=2,
-                    line_width_min_pixels=1,
-                    auto_highlight=True,
-                )
-
-                deck = pdk.Deck(
-                    layers=[geo_layer],
-                    initial_view_state=pdk.ViewState(
-                        latitude=5.7,
-                        longitude=12.3,
-                        zoom=5,
-                        pitch=0,
-                        bearing=0,
-                    ),
-                    map_style=None,
-                    tooltip={"text": "{shapeName}"},
-                )
-                st.pydeck_chart(deck, use_container_width=True)
-
-            st.caption(
-                "GeoJSON regions loaded: "
-                + ", ".join(geo_df["shapeName"].tolist())
-            )
-        else:
-            st.info("No mappable region names found in the GeoJSON file.")
-    except Exception as geo_exc:
-        st.warning(f"GeoJSON map unavailable: {geo_exc}")
-
-    monthly_source = live_filtered.dropna(subset=["date"]).copy()
-    if monthly_source.empty:
-        monthly_agg = pd.DataFrame(columns=["month", "cCh", "sCh", "deaths"])
+    if view_mode in ["By Year", "All Years Trend"]:
+        render_historical_dashboard(view_mode, regions, years)
     else:
-        monthly_agg = (
-            monthly_source.set_index("date")[["cCh", "sCh", "deaths"]]
-            .resample("MS")
-            .sum()
-            .reset_index()
-            .rename(columns={"date": "month"})
-            .sort_values("month")
-        )
+        render_live_dashboard()
 
-    if not monthly_agg.empty:
-        monthly_plot = monthly_agg.melt(
-            id_vars="month",
-            value_vars=["cCh", "sCh", "deaths"],
-            var_name="Metric",
-            value_name="Count"
-        )
-        monthly_plot["Metric"] = monthly_plot["Metric"].map(
-            {"cCh": "Confirmed", "sCh": "Suspected", "deaths": "Deaths"}
-        )
-        fig_trend = px.line(
-            monthly_plot,
-            x="month",
-            y="Count",
-            color="Metric",
-            markers=True,
-            title="Monthly Trend (Live MongoDB)",
-            color_discrete_map={"Confirmed": "#1e5fd8", "Suspected": "#f9a825", "Deaths": "#d32f2f"}
-        )
-        fig_trend.update_layout(
-            plot_bgcolor="#f7fbff",
-            paper_bgcolor="#ffffff",
-            title_font_color="#184fb6",
-            xaxis=dict(gridcolor="#dce9ff"),
-            yaxis=dict(gridcolor="#dce9ff")
-        )
-        st.plotly_chart(fig_trend, use_container_width=True)
 
+if __name__ == "__main__":
+    main()

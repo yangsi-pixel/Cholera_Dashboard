@@ -6,11 +6,11 @@ const router = express.Router();
 // POST /api/reports: create and store a new pandemic report.
 router.post("/", async (req, res, next) => {
   try {
-    const { date, pandemic, region, district, suspected, confirmed, deaths } = req.body;
+    const { date, region, district, suspected, confirmed, deaths } = req.body;
 
-    if (!date || !pandemic || !region || !district) {
+    if (!date || !region || !district) {
       return res.status(400).json({
-        message: "date, pandemic, region, and district are required"
+        message: "date, region, and district are required"
       });
     }
 
@@ -29,7 +29,6 @@ router.post("/", async (req, res, next) => {
 
     const report = await Report.create({
       date,
-      pandemic,
       region,
       district,
       suspected: suspectedNum,

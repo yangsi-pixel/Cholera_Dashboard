@@ -1,0 +1,3 @@
+Model,Best Params,CV F1 (macro),Hold-out Accuracy,Hold-out F1 (macro)
+Random Forest,"{'max_depth': 10, 'max_features': 0.5, 'min_samples_leaf': 5, 'min_samples_split': 2, 'n_estimators': 300}",0.6321556920940266,0.6722689075630253,0.6562323192757975
+XGBoost,"{'colsample_bytree': 0.6, 'gamma': 0.1, 'learning_rate': 0.01, 'max_depth': 3, 'n_estimators': 500, 'reg_alpha': 0, 'reg_lambda': 5, 'subsample': 1.0}",0.6482819854454395,0.6470588235294118,0.6297359144041067

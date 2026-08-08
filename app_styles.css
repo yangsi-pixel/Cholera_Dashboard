@@ -1,0 +1,87 @@
+:root {
+    --blue-50: #f4f8ff;
+    --blue-100: #e6f0ff;
+    --blue-200: #cfe0ff;
+    --blue-400: #4f8cff;
+    --blue-600: #1e5fd8;
+    --blue-700: #184fb6;
+    --blue-900: #0f2d66;
+}
+.stApp {
+    background: linear-gradient(180deg, var(--blue-50) 0%, #ffffff 55%, var(--blue-50) 100%);
+}
+h1, h2, h3, .stMarkdown, .stCaption {
+    color: var(--blue-900);
+}
+section[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #eaf3ff 0%, #dfefff 100%);
+    border-right: 1px solid var(--blue-200);
+}
+section[data-testid="stSidebar"] .stRadio label,
+section[data-testid="stSidebar"] .stSelectbox label,
+section[data-testid="stSidebar"] .stMultiSelect label {
+    color: var(--blue-700) !important;
+    font-weight: 600;
+}
+.stButton > button {
+    background: linear-gradient(180deg, var(--blue-400), var(--blue-600));
+    color: white;
+    border: 1px solid var(--blue-700);
+    border-radius: 10px;
+    font-weight: 600;
+}
+.stButton > button:hover {
+    background: linear-gradient(180deg, var(--blue-600), var(--blue-700));
+}
+[data-baseweb="select"] {
+    background-color: #eef5ff !important;
+    border: 1px solid var(--blue-200) !important;
+    border-radius: 10px !important;
+}
+.card {
+    border: 2px solid #1E90FF;
+    border-radius: 10px;
+    padding: 0px;
+    text-align: center;
+    transition: 0.3s;
+    height: 150px;
+    background: linear-gradient(180deg, #ffffff 0%, #eef5ff 100%);
+    display: flex;
+    flex-direction: column;
+    justify-content: left;
+    align-items: left;
+}
+.card:hover { background-color: #F0F8FF; box-shadow: 0px 4px 8px rgba(0,0,0,0.2); }
+.card h3 { margin: 0; color: #1E90FF; }
+.card p  { font-size: 22px; font-weight: bold; margin: 0px 0 0 0; }
+.env-card {
+    border-radius: 12px;
+    padding: 16px 20px;
+    margin-bottom: 8px;
+    background: linear-gradient(180deg, #ffffff 0%, #eef5ff 100%);
+    border-left: 6px solid;
+    border-top: 1px solid #d8e8ff;
+    border-right: 1px solid #d8e8ff;
+    border-bottom: 1px solid #d8e8ff;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+.env-card .label { font-size: 16px; font-weight: 600; color: #333; }
+.env-card .value { font-size: 15px; color: #555; }
+.env-card .badge {
+    font-size: 14px; font-weight: bold;
+    padding: 4px 14px; border-radius: 20px; color: white;
+}
+.risk-banner {
+    border-radius: 12px; padding: 18px 24px;
+    text-align: center; font-size: 20px;
+    font-weight: bold; color: white; margin-top: 12px;
+    box-shadow: 0 4px 16px rgba(24, 79, 182, 0.2);
+}
+/* Blue background for selected multiselect tags */
+div[data-baseweb="tag"] {
+    background-color: #d9e8ff !important;
+    color: #0f2d66 !important;
+    border: 1px solid #a9c7ff !important;
+}

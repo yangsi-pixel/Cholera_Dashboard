@@ -1,19 +1,16 @@
 import { useMemo, useState } from "react";
 import axios from "axios";
-import cameroonDistricts, { regionOptions } from "../data/cameroonDistricts";
 import "../styles/AdminPage.css";
+import { regionOptions } from "../data/cameroonDistricts";
 
 const initialFormState = {
   date: "",
-  pandemic: "",
   region: "",
   district: "",
   suspected: "",
   confirmed: "",
   deaths: ""
 };
-
-const pandemicOptions = ["Cholera", "COVID-19", "Measles", "Mpox", "Influenza"];
 
 function AdminPage() {
   const [formData, setFormData] = useState(initialFormState);
@@ -47,6 +44,8 @@ function AdminPage() {
     setErrorMessage("");
   };
 
+  const today = new Date().toISOString().split("T")[0];
+
   const handleSubmit = async (event) => {
     event.preventDefault();
     setLoading(true);
@@ -55,7 +54,6 @@ function AdminPage() {
 
     const payload = {
       date: formData.date,
-      pandemic: formData.pandemic,
       region: formData.region,
       district: formData.district,
       suspected: Number(formData.suspected) || 0,
@@ -81,9 +79,9 @@ function AdminPage() {
   return (
     <main className="admin-page">
       <section className="admin-card" aria-labelledby="admin-page-title">
-        <h1 id="admin-page-title">Pandemic Case Data Entry - Cameroon</h1>
+        <h1 id="admin-page-title">Cholera Pandemic Case Data Entry - Cameroon</h1>
         <p className="admin-subtitle">
-          Use this form to submit daily district-level pandemic surveillance reports.
+          Use this form to submit daily cholera district-level pandemic surveillance reports.
         </p>
 
         <form className="admin-form" onSubmit={handleSubmit}>
@@ -94,24 +92,9 @@ function AdminPage() {
             type="date"
             value={formData.date}
             onChange={handleChange}
+            max={today}
             required
           />
-
-          <label htmlFor="pandemic">Pandemic</label>
-          <select
-            id="pandemic"
-            name="pandemic"
-            value={formData.pandemic}
-            onChange={handleChange}
-            required
-          >
-            <option value="">Select a pandemic</option>
-            {pandemicOptions.map((pandemic) => (
-              <option key={pandemic} value={pandemic}>
-                {pandemic}
-              </option>
-            ))}
-          </select>
 
           <label htmlFor="region">Region</label>
           <select
@@ -177,7 +160,7 @@ function AdminPage() {
           <input id="cfr" name="cfr" type="text" value={cfr} readOnly />
 
           <button type="submit" disabled={loading}>
-            {loading ? "Submitting..." : "Submit Report"}
+            {loading ? "Submitting..." : "Submit Data"}
           </button>
         </form>
 

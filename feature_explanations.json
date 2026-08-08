@@ -1,0 +1,44 @@
+{
+    "month": "Seasonal patterns influenced the predicted cholera risk.",
+    "month_sin": "Seasonal variation patterns contributed to the prediction.",
+    "month_cos": "Seasonal timing patterns contributed to the prediction.",
+
+    "cases": "Current reported cholera cases influenced the risk estimate.",
+    "cases_lag1": "Cholera cases from the previous month influenced the prediction.",
+    "cases_lag2": "Cholera cases from two months earlier contributed to the prediction.",
+    "cases_lag3": "Previous case trends over three months affected the prediction.",
+    "cases_lag6": "Longer-term historical case patterns influenced the risk estimate.",
+    "cases_lag12": "Previous yearly case patterns contributed to risk estimation.",
+    "cases_roll3": "Recent cholera case trends influenced the prediction.",
+    "cases_std3": "Variation in recent case numbers affected risk estimation.",
+    "cases_growth": "Changes in cholera cases over time influenced outbreak risk.",
+
+    "temperature_lag1": "Temperature conditions from the previous month influenced risk.",
+    "temperature_lag2": "Temperature conditions from previous months affected risk.",
+    "temperature_lag3": "Delayed temperature effects contributed to the prediction.",
+
+    "humidity_avg": "Average humidity conditions influenced cholera risk.",
+    "humidity_lag1": "Recent humidity conditions contributed to the prediction.",
+    "humidity_lag2": "Previous humidity levels influenced risk estimation.",
+    "humidity_lag6": "Long-term humidity patterns affected prediction.",
+    "humidity_roll3": "Recent humidity trends contributed to the model decision.",
+    "humidity_std3": "Changes in humidity levels influenced risk stability.",
+
+    "rainfall_avg": "Average rainfall conditions influenced outbreak risk.",
+    "rainfall_lag1": "Recent rainfall conditions contributed to the prediction.",
+    "rainfall_lag2": "Previous rainfall patterns influenced risk.",
+    "rainfall_lag3": "Delayed rainfall effects contributed to risk estimation.",
+    "rainfall_lag6": "Longer-term rainfall patterns affected prediction.",
+    "rainfall_lag12": "Historical rainfall patterns influenced risk.",
+    "rainfall_roll3": "Recent rainfall trends contributed to the prediction.",
+    "rainfall_std3": "Changes in rainfall patterns affected risk.",
+    "rainfall_change": "Recent changes in rainfall influenced the prediction.",
+
+    "deaths": "Previous cholera-related deaths influenced risk estimation.",
+
+    "rainfall_x_humidity": "The combined effect of rainfall and humidity influenced risk.",
+    "cases_x_deaths": "The relationship between cases and deaths contributed to risk.",
+    "rainfall_x_temp": "The interaction between rainfall and temperature affected risk.",
+    "humidity_x_temp": "The combined effect of humidity and temperature influenced risk.",
+    "rainfall_cases": "The interaction between rainfall conditions and previous cases affected risk."
+}
