@@ -6,3 +6,6 @@ scikit-learn
 xgboost
 lightgbm
 shap
+supabase==2.31.0
+geopandas
+joblib
