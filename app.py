@@ -1,35 +1,20 @@
 import os
 import json
+
 import numpy as np
 import pandas as pd
 import plotly.express as px
-import requests
 import streamlit as st
-from prediction_features import PREDICTION_FEATURE_COLUMNS, create_prediction_features, predict_next_month_risk
-from region_coords import DEFAULT_COORDS, REGION_COORDS
+from live_data_processing import (
+    build_live_regional_monthly_environment_table as build_live_risk_table,
+    load_supabase_data as load_live_supabase_data,
+    refresh_supabase_data,
+)
 
 try:
     import geopandas as gpd
 except ImportError:
     gpd = None
-
-try:
-    from pymongo import MongoClient
-    from pymongo.server_api import ServerApi
-except ImportError:
-    MongoClient = None
-    ServerApi = None
-
-try:
-    import joblib
-except ImportError:
-    joblib = None
-
-
-MONGODB_URI = os.getenv(
-    "MONGODB_URI",
-    "mongodb+srv://yangsisonia9_db_user:64687@cluster0.295yjzd.mongodb.net/",
-)
 
 CMAP = {"Confirmed": "#1e5fd8", "Suspected": "#f9a825", "Deaths": "#d32f2f"}
 RISK_COLOR_MAP = {"Low": "#2e7d32", "Medium": "#ef6c00", "High": "#c62828"}
@@ -49,6 +34,24 @@ def normalize_region_name(series: pd.Series) -> pd.Series:
             "southwestprovince": "southwest",
         }
     )
+
+
+def get_display_region_name(region_str: str) -> str:
+    # Map normalized region names to canonical display names.
+    normalized = normalize_region_name(pd.Series([region_str])).iloc[0]
+    display_map = {
+        "adamaoua": "Adamaoua",
+        "centre": "Centre",
+        "east": "East",
+        "farnorth": "Far-North",
+        "littoral": "Littoral",
+        "north": "North",
+        "northwest": "North-West",
+        "south": "South",
+        "southwest": "South-West",
+        "west": "West",
+    }
+    return display_map.get(normalized, region_str)
 
 
 @st.cache_data(ttl=3600)
@@ -325,18 +328,18 @@ def prepare_history_for_features(history_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_live_history_rows(monthly_env: pd.DataFrame) -> pd.DataFrame:
-    # Convert monthly MongoDB aggregates into temporary history rows for lag features.
+    # Convert monthly Supabase aggregates into temporary history rows for lag features.
     if monthly_env.empty:
         return pd.DataFrame(columns=["Region", "month_date", "cases", "rainfall_avg"])
 
-    live_history = monthly_env[["region_en", "report_month", "cCh", "sCh", "rainfall_avg"]].copy()
-    live_history["Region"] = live_history["region_en"]
+    live_history = monthly_env[["region", "report_month", "confirmed", "suspected", "rainfall"]].copy()
+    live_history["Region"] = live_history["region"]
     live_history["month_date"] = pd.to_datetime(live_history["report_month"] + "-01", errors="coerce")
     live_history["cases"] = (
-        pd.to_numeric(live_history["cCh"], errors="coerce").fillna(0)
-        + pd.to_numeric(live_history["sCh"], errors="coerce").fillna(0)
+        pd.to_numeric(live_history["confirmed"], errors="coerce").fillna(0)
+        + pd.to_numeric(live_history["suspected"], errors="coerce").fillna(0)
     )
-    live_history["rainfall_avg"] = pd.to_numeric(live_history["rainfall_avg"], errors="coerce").fillna(0)
+    live_history["rainfall_avg"] = pd.to_numeric(live_history["rainfall"], errors="coerce").fillna(0)
     return live_history[["Region", "month_date", "cases", "rainfall_avg"]].dropna(subset=["month_date"])
 
 
@@ -422,31 +425,77 @@ def predict_occurrence_risk(report, history_df, region_cols):
     return RISK_LABELS.get(prediction, "Unknown")
 
 
-def standardize_mongo_records(raw_df: pd.DataFrame) -> pd.DataFrame:
-    # Map flexible Mongo fields into the dashboard's canonical schema.
-    if raw_df.empty:
-        return pd.DataFrame(columns=["date", "region_en", "district", "sCh", "cCh", "deaths"])
+def explain_risk_with_shap(report_row, model) -> str:
+    """Return a short, SHAP-based explanation for a single model prediction."""
+    if isinstance(report_row, pd.DataFrame):
+        feature_row = report_row.iloc[[0]].copy()
+    elif isinstance(report_row, pd.Series):
+        feature_row = report_row.to_frame().T
+    else:
+        feature_row = pd.DataFrame([report_row])
 
-    region_col = pick_first_existing(raw_df, ["region", "region_en", "Region", "regionName"])
-    district_col = pick_first_existing(raw_df, ["district", "district_name", "District"])
-    date_col = pick_first_existing(raw_df, ["date", "report_date", "createdAt", "created_at", "timestamp", "TL"])
-    suspected_col = pick_first_existing(raw_df, ["suspected", "sCh", "suspectedCases"])
-    confirmed_col = pick_first_existing(raw_df, ["confirmed", "cCh", "confirmedCases"])
-    deaths_col = pick_first_existing(raw_df, ["deaths", "Deaths"])
+    model_features = list(getattr(model, "feature_names_in_", feature_row.columns))
+    feature_row = feature_row.reindex(columns=model_features, fill_value=0)
+    feature_row = feature_row.apply(pd.to_numeric, errors="coerce").fillna(0)
 
-    raw_df["region_en"] = "Unknown" if region_col is None else raw_df[region_col].astype(str).replace("nan", "Unknown")
-    raw_df["district"] = "Unknown" if district_col is None else raw_df[district_col].astype(str).replace("nan", "Unknown")
-    raw_df["date"] = pd.Timestamp.utcnow() if date_col is None else pd.to_datetime(raw_df[date_col], errors="coerce")
+    prediction = model.predict(feature_row)[0]
+    classes = list(getattr(model, "classes_", []))
+    # Binary ensemble models use 0/1 for Low/High; the three-class risk model
+    # uses 0/1/2 for Low/Medium/High.
+    if set(classes) == {0, 1}:
+        risk_label = ENSEMBLE_RISK_LABELS.get(int(prediction), str(prediction))
+    else:
+        risk_label = RISK_LABELS.get(int(prediction), str(prediction))
 
-    raw_df["sCh"] = pd.to_numeric(raw_df[suspected_col], errors="coerce").fillna(0) if suspected_col else 0
-    raw_df["cCh"] = pd.to_numeric(raw_df[confirmed_col], errors="coerce").fillna(0) if confirmed_col else 0
-    raw_df["deaths"] = pd.to_numeric(raw_df[deaths_col], errors="coerce").fillna(0) if deaths_col else 0
+    try:
+        explainer = shap.Explainer(model, feature_row)
+    except TypeError:
+        # VotingClassifier is not directly supported by SHAP's model dispatch.
+        # Its probability function still represents this model's predictions.
+        if not hasattr(model, "predict_proba"):
+            raise
+        explainer = shap.Explainer(model.predict_proba, feature_row)
+    shap_values = explainer(feature_row, max_evals=(2 * len(model_features)) + 1)
+    values = np.asarray(shap_values.values)
 
-    result = raw_df[["date", "region_en", "district", "sCh", "cCh", "deaths"]].copy()
-    result["date"] = pd.to_datetime(result["date"], errors="coerce")
-    result["year"] = result["date"].dt.year
-    result["region_norm"] = normalize_region_name(result["region_en"])
-    return result
+    if values.ndim == 3:
+        class_index = classes.index(prediction) if prediction in classes else 0
+        contributions = values[0, :, class_index]
+    else:
+        contributions = values[0]
+
+    contribution_series = pd.Series(contributions, index=model_features)
+    positive_drivers = contribution_series[contribution_series > 0].sort_values(ascending=False)
+    drivers = positive_drivers if not positive_drivers.empty else contribution_series.abs().sort_values(ascending=False)
+
+    friendly_names = {
+        "rainfall_avg": "rainfall",
+        "rainfall": "rainfall",
+        "humidity_avg": "humidity",
+        "humidity": "humidity",
+        "temperature_avg": "temperature",
+        "temperature": "temperature",
+        "month": "seasonal timing",
+        "month_sin": "seasonal timing",
+        "month_cos": "seasonal timing",
+        "cases": "case counts",
+        "confirmed": "confirmed cases",
+        "suspected": "suspected cases",
+        "deaths": "deaths",
+        "cfr": "CFR",
+    }
+    top_drivers = []
+    for name in drivers.index:
+        friendly_name = friendly_names.get(name, str(name).replace("_", " "))
+        if friendly_name not in top_drivers:
+            top_drivers.append(friendly_name)
+        if len(top_drivers) == 2:
+            break
+    driver_text = " and ".join(top_drivers) if top_drivers else "the available report features"
+
+    if risk_label == "Low":
+        return f"Low risk because {driver_text} keep the predicted risk low."
+    return f"{risk_label} risk due mainly to {driver_text}."
 
 
 def build_live_regional_monthly_environment_table(
@@ -454,9 +503,7 @@ def build_live_regional_monthly_environment_table(
     live_history_df: pd.DataFrame | None = None,
     latest_per_region: bool = False,
 ) -> pd.DataFrame:
-    # Build one row per region/month for the risk table. The ensemble feature
-    # pipeline handles environmental values separately, so this table should not
-    # block on NASA API calls.
+    # Build one row per region/month for the risk table from Supabase reports.
     env_source = live_region_df.dropna(subset=["date"]).copy()
     if env_source.empty:
         return pd.DataFrame()
@@ -468,30 +515,48 @@ def build_live_regional_monthly_environment_table(
         return pd.DataFrame()
 
     monthly_env = (
-        env_source.groupby(["region_en", "report_month"], as_index=False)[["cCh", "sCh", "deaths"]]
-        .sum()
-        .sort_values(["report_month", "region_en"])
+        env_source.groupby(["region", "report_month"], as_index=False)
+        .agg(
+            confirmed=("confirmed", "sum"),
+            suspected=("suspected", "sum"),
+            deaths=("deaths", "sum"),
+            rainfall=("rainfall", "mean"),
+            temperature=("temperature", "mean"),
+            humidity=("humidity", "mean"),
+        )
+        .sort_values(["report_month", "region"])
     )
     if monthly_env.empty:
         return pd.DataFrame()
 
     if latest_per_region:
         monthly_env = (
-            monthly_env.sort_values(["region_en", "report_month"])
-            .groupby("region_en", as_index=False)
+            monthly_env.sort_values(["region", "report_month"])
+            .groupby("region", as_index=False)
             .tail(1)
-            .sort_values("region_en")
+            .sort_values("region")
         )
 
     def predict_row_output(row):
         try:
-            prediction_result = predict_next_month_risk(row["region_en"])
+            prediction_result = predict_next_month_risk(row["region"])
             prediction = prediction_result["prediction"]
+            model = prediction_result.get("model")
+            if model is None:
+                # Supports an already-running Streamlit process that imported
+                # the prediction helper before the SHAP model reference was added.
+                risk_explanation = "Prediction succeeded; restart the app to enable SHAP explanations."
+            else:
+                try:
+                    risk_explanation = explain_risk_with_shap(prediction_result["features"], model)
+                except Exception as exc:
+                    risk_explanation = f"SHAP explanation unavailable: {exc}"
             return pd.Series(
                 {
                     "OutbreakRisk_NextMonth": ENSEMBLE_RISK_LABELS.get(prediction, str(prediction)),
                     "OutbreakRisk_Class": prediction,
                     "Prediction_Error": "",
+                    "risk_explanation": risk_explanation,
                 }
             )
         except Exception as exc:
@@ -500,124 +565,51 @@ def build_live_regional_monthly_environment_table(
                     "OutbreakRisk_NextMonth": "Unavailable",
                     "OutbreakRisk_Class": pd.NA,
                     "Prediction_Error": str(exc),
+                    "risk_explanation": "Explanation unavailable.",
                 }
             )
 
-    monthly_env[["OutbreakRisk_NextMonth", "OutbreakRisk_Class", "Prediction_Error"]] = monthly_env.apply(predict_row_output, axis=1)
+    monthly_env[["OutbreakRisk_NextMonth", "OutbreakRisk_Class", "Prediction_Error", "risk_explanation"]] = monthly_env.apply(predict_row_output, axis=1)
     return monthly_env
 
 
 @st.cache_data(ttl=300)
-def load_mongo_live_data():
-    # Load reports from MongoDB, trying preferred databases/collections first.
-    if MongoClient is None:
-        raise RuntimeError("pymongo is not installed. Run: pip install pymongo")
-
-    client = MongoClient(MONGODB_URI, server_api=ServerApi("1"))
-    client.admin.command("ping")
-
-    preferred_dbs = [
-        "cholera_monitoring_dashboard",
-        "cholera_monitoring_dashboad_project",
-        "cholera_monitoring_dashboard_project",
-        "cholera monitoring dashboad project",
-        "test",
+def load_supabase_data() -> pd.DataFrame:
+    """Load all report rows from Supabase in the dashboard's canonical schema."""
+    columns = [
+        "date", "region", "district", "confirmed", "suspected", "deaths",
+        "cfr", "rainfall", "temperature", "humidity",
     ]
-    preferred_collections = ["reports", "report", "cholera_reports", "records"]
+    rows = []
+    page_size = 1000
+    start = 0
 
-    db_names = client.list_database_names()
-    ordered_dbs = [name for name in preferred_dbs if name in db_names] + [
-        name for name in db_names if name not in preferred_dbs and name not in {"admin", "local", "config"}
-    ]
+    while True:
+        response = (
+            supabase.table("reports")
+            .select(",".join(columns))
+            .order("id")
+            .range(start, start + page_size - 1)
+            .execute()
+        )
+        page = response.data or []
+        rows.extend(page)
+        if len(page) < page_size:
+            break
+        start += page_size
 
-    for db_name in ordered_dbs:
-        db = client[db_name]
-        col_names = db.list_collection_names()
-        ordered_cols = [name for name in preferred_collections if name in col_names] + [
-            name for name in col_names if name not in preferred_collections
-        ]
+    data = pd.DataFrame(rows, columns=columns)
+    if data.empty:
+        data["year"] = pd.Series(dtype="Int64")
+        return data
 
-        for col_name in ordered_cols:
-            docs = list(db[col_name].find({}, {"_id": 0}).limit(10000))
-            if not docs:
-                continue
-            mongo_df = standardize_mongo_records(pd.DataFrame(docs))
-            if not mongo_df.empty and mongo_df[["sCh", "cCh", "deaths"]].sum().sum() > 0:
-                return mongo_df, f"{db_name}.{col_name}"
-
-    return pd.DataFrame(columns=["date", "region_en", "district", "sCh", "cCh", "deaths", "year", "region_norm"]), ""
-
-
-def get_coords(region: str):
-    # Resolve a region/district string to a representative map coordinate.
-    for key, value in REGION_COORDS.items():
-        if key.lower() in region.lower() or region.lower() in key.lower():
-            return value
-    return DEFAULT_COORDS
-
-
-@st.cache_data(ttl=3600)
-def fetch_nasa_conditions_for_date(lat, lon, report_date_str):
-    # Fetch NASA POWER daily rainfall, temperature, and humidity for one date.
-    report_dt = pd.to_datetime(report_date_str, errors="coerce")
-    if pd.isna(report_dt):
-        return {"rainfall_avg": None, "temp_avg": None, "humidity_avg": None, "date": None}
-
-    date_token = report_dt.strftime("%Y%m%d")
-    url = (
-        "https://power.larc.nasa.gov/api/temporal/daily/point?"
-        f"parameters=PRECTOT,T2M,RH2M&start={date_token}&end={date_token}"
-        f"&latitude={lat}&longitude={lon}&community=AG&format=JSON"
-    )
-    resp = requests.get(url, timeout=20)
-    resp.raise_for_status()
-
-    data = resp.json().get("properties", {}).get("parameter", {})
-    rain_raw = data.get("PRECTOT", {}).get(date_token, -999)
-    temp_raw = data.get("T2M", {}).get(date_token, -999)
-    hum_raw = data.get("RH2M", {}).get(date_token, -999)
-
-    return {
-        "rainfall_avg": None if rain_raw == -999 else float(rain_raw),
-        "temp_avg": None if temp_raw == -999 else float(temp_raw),
-        "humidity_avg": None if hum_raw == -999 else float(hum_raw),
-        "date": report_dt.strftime("%Y-%m-%d"),
-    }
-
-
-@st.cache_data(ttl=3600)
-def fetch_nasa_conditions_for_month(lat, lon, report_month_str):
-    # Fetch NASA POWER values once for the full month and return monthly averages.
-    month_dt = pd.to_datetime(f"{report_month_str}-01", errors="coerce")
-    if pd.isna(month_dt):
-        return {"rainfall_avg": None, "temp_avg": None, "humidity_avg": None, "month": None}
-
-    start_token = month_dt.strftime("%Y%m%d")
-    end_token = month_dt.to_period("M").end_time.strftime("%Y%m%d")
-    url = (
-        "https://power.larc.nasa.gov/api/temporal/daily/point?"
-        f"parameters=PRECTOT,T2M,RH2M&start={start_token}&end={end_token}"
-        f"&latitude={lat}&longitude={lon}&community=AG&format=JSON"
-    )
-    resp = requests.get(url, timeout=20)
-    resp.raise_for_status()
-
-    data = resp.json().get("properties", {}).get("parameter", {})
-
-    def monthly_average(parameter_name):
-        values = [
-            float(value)
-            for value in data.get(parameter_name, {}).values()
-            if value != -999
-        ]
-        return sum(values) / len(values) if values else None
-
-    return {
-        "rainfall_avg": monthly_average("PRECTOT"),
-        "temp_avg": monthly_average("T2M"),
-        "humidity_avg": monthly_average("RH2M"),
-        "month": month_dt.strftime("%Y-%m"),
-    }
+    data["date"] = pd.to_datetime(data["date"], errors="coerce", utc=True).dt.tz_localize(None)
+    data["region"] = data["region"].fillna("Unknown").astype(str)
+    data["district"] = data["district"].fillna("Unknown").astype(str)
+    for column in ["confirmed", "suspected", "deaths", "cfr", "rainfall", "temperature", "humidity"]:
+        data[column] = pd.to_numeric(data[column], errors="coerce").fillna(0)
+    data["year"] = data["date"].dt.year.astype("Int64")
+    return data
 
 
 def classify_environmental_risk(rainfall_avg, humidity_avg, temp_avg):
@@ -874,27 +866,35 @@ def render_historical_dashboard(view_mode, regions, years):
 
 
 def render_live_dashboard():
-    # Render the complete dashboard sourced from MongoDB records.
-    st.subheader(" Cholera Reports - MongoDB(Demo)")
+    # Render the complete dashboard sourced from Supabase reports.
+    st.subheader("Cholera Reports - Supabase")
 
     rcol, _ = st.columns([1, 5])
     with rcol:
-        if st.button("Refresh Data"):
-            st.cache_data.clear()
+        refresh_requested = st.button("Refresh Data")
 
     try:
-        live_df, source_collection = load_mongo_live_data()
+        if refresh_requested:
+            # Fetch current rows, but retain per-region predictions when their
+            # report fingerprint has not changed.
+            st.session_state["live_reports"] = refresh_supabase_data()
+        elif "live_reports" not in st.session_state:
+            st.session_state["live_reports"] = load_live_supabase_data()
+        live_df = st.session_state["live_reports"].copy()
     except Exception as exc:
-        st.error(f"Unable to load MongoDB data: {exc}")
+        st.error(f"Unable to load Supabase data: {exc}")
         return
 
     if live_df.empty:
-        st.warning("No records were found in MongoDB collections for visualization.")
+        st.warning("No records were found in the Supabase reports table.")
         return
 
-    st.caption(f"Source: MongoDB ({source_collection})")
+    st.caption("Source: Supabase (reports)")
 
-    region_options = ["All Regions"] + sorted(live_df["region_en"].dropna().unique().tolist())
+    # Build region options with deduplicated display names
+    unique_regions = live_df["region"].dropna().unique()
+    display_names = [get_display_region_name(r) for r in unique_regions]
+    region_options = ["All Regions"] + sorted(set(display_names))
     selected_region = st.sidebar.selectbox("Region", region_options)
 
     if selected_region == "All Regions":
@@ -902,20 +902,22 @@ def render_live_dashboard():
         selected_district = st.sidebar.selectbox("District", ["All Districts"], disabled=True)
     else:
         selected_live_norm = normalize_region_name(pd.Series([selected_region])).iloc[0]
-        region_filtered = live_df[live_df["region_norm"] == selected_live_norm].copy()
+        region_filtered = live_df[
+            normalize_region_name(live_df["region"]) == selected_live_norm
+        ].copy()
         district_options = ["All Districts"] + sorted(region_filtered["district"].dropna().unique().tolist())
         selected_district = st.sidebar.selectbox("District", district_options)
 
     live_filtered = region_filtered if selected_district == "All Districts" else region_filtered[region_filtered["district"] == selected_district].copy()
     if live_filtered.empty:
-        st.warning("No MongoDB records for the selected filters.")
+        st.warning("No Supabase records for the selected filters.")
         return
 
     live_filtered["report_month"] = pd.to_datetime(live_filtered["date"], errors="coerce").dt.to_period("M").astype(str)
     live_filtered["report_month"] = live_filtered["report_month"].replace("NaT", pd.NA)
     live_month_options = sorted(live_filtered["report_month"].dropna().unique().tolist(), reverse=True)
     if not live_month_options:
-        st.warning("No valid report dates are available in MongoDB records.")
+        st.warning("No valid report dates are available in Supabase records.")
         return
 
     live_month_labels = ["All Months"] + live_month_options
@@ -925,7 +927,7 @@ def render_live_dashboard():
     if selected_live_month_label != "All Months":
         live_filtered = live_filtered[live_filtered["report_month"] == selected_live_month_label].copy()
         if live_filtered.empty:
-            st.warning("No MongoDB records for the selected month.")
+            st.warning("No Supabase records for the selected month.")
             return
 
     st.caption(
@@ -934,8 +936,8 @@ def render_live_dashboard():
         else f" month selected: {selected_live_month_label}"
     )
 
-    total_confirmed = int(live_filtered["cCh"].sum())
-    total_suspected = int(live_filtered["sCh"].sum())
+    total_confirmed = int(live_filtered["confirmed"].sum())
+    total_suspected = int(live_filtered["suspected"].sum())
     total_deaths = int(live_filtered["deaths"].sum())
     cfr = (total_deaths / total_confirmed * 100) if total_confirmed > 0 else 0
     render_metric_cards(total_confirmed, total_suspected, total_deaths, cfr)
@@ -943,13 +945,15 @@ def render_live_dashboard():
     live_case_df = live_filtered.dropna(subset=["date"]).copy()
     if not live_case_df.empty:
         live_case_df["TL"] = pd.to_datetime(live_case_df["date"], errors="coerce")
+        live_case_df["cCh"] = live_case_df["confirmed"]
+        live_case_df["sCh"] = live_case_df["suspected"]
         live_title_suffix = " - All Months" if selected_live_month_label == "All Months" else f" - {selected_live_month_label}"
         live_chart_title = f" Cholera Cases in {selected_region} - {selected_district}{live_title_suffix}"
         if live_chart_type == "Pie":
             live_chart_title = f"Distribution of Cholera Metrics in {selected_region} - {selected_district}{live_title_suffix}"
         render_main_historical_chart(live_case_df, live_chart_type, live_chart_title)
 
-    env_table = build_live_regional_monthly_environment_table(
+    env_table = build_live_risk_table(
         region_filtered,
         live_history_df=region_filtered,
         latest_per_region=True,
@@ -961,20 +965,28 @@ def render_live_dashboard():
             return f"background-color: {color}; color: white; font-weight: 700"
 
         st.subheader("Risk Prediction Table")
-        risk_table_columns = ["region_en", "report_month", "OutbreakRisk_Class", "OutbreakRisk_NextMonth"]
-        if "Prediction_Error" in env_table.columns and env_table["Prediction_Error"].astype(str).str.len().gt(0).any():
-            risk_table_columns.append("Prediction_Error")
+        risk_table_columns = [
+            "region",
+            "report_month",
+            "OutbreakRisk_Class",
+            "OutbreakRisk_NextMonth",
+            "risk_explanation",
+        ]
 
         display_env_table = env_table[risk_table_columns].rename(
             columns={
-                "region_en": "Region",
+                "region": "Region",
                 "report_month": "Last Report Month",
                 "OutbreakRisk_Class": "Model Output",
-                "Prediction_Error": "Prediction Error",
+                "risk_explanation": "SHAP Explanation",
             }
         )
         st.dataframe(
             display_env_table.style.applymap(risk_cell_style, subset=["OutbreakRisk_NextMonth"]),
+            column_config={
+                "SHAP Explanation": st.column_config.TextColumn("SHAP Explanation", width="large"),
+            },
+            hide_index=True,
             use_container_width=True,
         )
 
