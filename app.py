@@ -1050,7 +1050,7 @@ def render_live_dashboard():
                         }
                     )
 
-            env_table[["OutbreakRisk_Class", "OutbreakRisk_NextMonth", "risk_explanation", "Prediction_Error"]] = (
+            env_table[["OutbreakRisk_Class", "OutbreakRisk_NextMonth", "Prediction_Confidence", "risk_explanation", "Prediction_Error"]] = (
                 env_table.apply(apply_three_class_model, axis=1)
             )
 
