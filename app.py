@@ -4,10 +4,19 @@ import json
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import shap
 import streamlit as st
+from supabase import create_client
+
+try:
+    import joblib
+except ImportError:
+    joblib = None
+
 from live_data_processing import (
     build_live_regional_monthly_environment_table as build_live_risk_table,
     load_supabase_data as load_live_supabase_data,
+    predict_next_month_risk,
     refresh_supabase_data,
 )
 
@@ -20,6 +29,10 @@ CMAP = {"Confirmed": "#1e5fd8", "Suspected": "#f9a825", "Deaths": "#d32f2f"}
 RISK_COLOR_MAP = {"Low": "#2e7d32", "Medium": "#ef6c00", "High": "#c62828"}
 RISK_LABELS = {0: "Low", 1: "Medium", 2: "High"}
 ENSEMBLE_RISK_LABELS = {0: "Low", 1: "High"}
+
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://wvykyedcdloopzyfhlbe.supabase.co")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "sb_publishable_AcbXoyx9KzVP4TOd06oMeA_oq5YYp-s")
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
 def normalize_region_name(series: pd.Series) -> pd.Series:
@@ -164,11 +177,12 @@ def load_regional_hotspot_source():
 
 @st.cache_data(ttl=3600)
 def load_regional_boundaries():
-    # Load ADM2 boundaries and dissolve them to ADM1 regional geometries.
+    # Load the tracked ADM1 boundary source used by the hotspot map.
     if gpd is None:
         raise RuntimeError("geopandas is not installed. Run: pip install geopandas")
 
     candidate_files = [
+        "geoBoundaries-CMR-ADM1.geojson",
         "cmr_admin_boundaries.geojson",
         os.path.join("cmr_admin_boundaries", "cmr_admin2.geojson"),
     ]
@@ -177,7 +191,12 @@ def load_regional_boundaries():
         raise FileNotFoundError("Cameroon administrative boundary GeoJSON was not found.")
 
     boundaries = gpd.read_file(boundary_path)
-    regional_boundaries = boundaries[["adm1_name", "geometry"]].dissolve(by="adm1_name", as_index=False)
+    name_column = "shapeName" if "shapeName" in boundaries.columns else "adm1_name"
+    regional_boundaries = (
+        boundaries[[name_column, "geometry"]]
+        .rename(columns={name_column: "adm1_name"})
+        .dissolve(by="adm1_name", as_index=False)
+    )
     return regional_boundaries
 
 
@@ -423,6 +442,38 @@ def predict_occurrence_risk(report, history_df, region_cols):
 
     prediction = int(model.predict(feature_row)[0])
     return RISK_LABELS.get(prediction, "Unknown")
+
+
+def build_three_class_live_prediction(region, region_history):
+    model = load_cholera_risk_model()
+    model_features = getattr(model, "feature_names_in_", None)
+    region_cols = [
+        feature for feature in (model_features if model_features is not None else [])
+        if str(feature).startswith("Region_")
+    ]
+
+    latest_record = region_history.sort_values("date").iloc[-1]
+    report = latest_record.to_dict()
+    report["reporting_date"] = report.get("date")
+    report["region"] = region
+    report["rainfall_avg"] = report.get("rainfall", 0)
+    report["temperature_avg"] = report.get("temperature", 0)
+    report["humidity_avg"] = report.get("humidity", 0)
+
+    feature_row = build_features(report, region_history, region_cols)
+    if model_features is not None:
+        feature_row = feature_row.reindex(columns=list(model_features), fill_value=0)
+
+    prediction = int(model.predict(feature_row)[0])
+    try:
+        explanation = explain_risk_with_shap(feature_row, model)
+    except Exception as exc:
+        explanation = f"SHAP explanation unavailable: {exc}"
+    return {
+        "prediction": prediction,
+        "label": RISK_LABELS.get(prediction, str(prediction)),
+        "explanation": explanation,
+    }
 
 
 def explain_risk_with_shap(report_row, model) -> str:
@@ -923,6 +974,11 @@ def render_live_dashboard():
     live_month_labels = ["All Months"] + live_month_options
     selected_live_month_label = st.sidebar.selectbox(" Report Month", live_month_labels, index=0)
     live_chart_type = st.sidebar.radio(" Chart Type", ["Line", "Bar", "Pie"], index=0)
+    selected_risk_model = st.sidebar.radio(
+        "Risk Model",
+        ["Two-Class Ensemble (Low/High)", "Three-Class Risk Model (Low/Medium/High)"],
+        index=0,
+    )
 
     if selected_live_month_label != "All Months":
         live_filtered = live_filtered[live_filtered["report_month"] == selected_live_month_label].copy()
@@ -960,6 +1016,35 @@ def render_live_dashboard():
     )
     if not env_table.empty:
 
+        if selected_risk_model == "Three-Class Risk Model (Low/Medium/High)":
+            def apply_three_class_model(row):
+                selected_region_history = region_filtered[
+                    normalize_region_name(region_filtered["region"]) == normalize_region_name(pd.Series([row["region"]])).iloc[0]
+                ].copy()
+                try:
+                    result = build_three_class_live_prediction(row["region"], selected_region_history)
+                    return pd.Series(
+                        {
+                            "OutbreakRisk_Class": result["prediction"],
+                            "OutbreakRisk_NextMonth": result["label"],
+                            "risk_explanation": result["explanation"],
+                            "Prediction_Error": "",
+                        }
+                    )
+                except Exception as exc:
+                    return pd.Series(
+                        {
+                            "OutbreakRisk_Class": pd.NA,
+                            "OutbreakRisk_NextMonth": "Unavailable",
+                            "risk_explanation": "Explanation unavailable.",
+                            "Prediction_Error": str(exc),
+                        }
+                    )
+
+            env_table[["OutbreakRisk_Class", "OutbreakRisk_NextMonth", "risk_explanation", "Prediction_Error"]] = (
+                env_table.apply(apply_three_class_model, axis=1)
+            )
+
         def risk_cell_style(value):
             color = RISK_COLOR_MAP.get(str(value), "#455a64")
             return f"background-color: {color}; color: white; font-weight: 700"
@@ -982,7 +1067,7 @@ def render_live_dashboard():
             }
         )
         st.dataframe(
-            display_env_table.style.applymap(risk_cell_style, subset=["OutbreakRisk_NextMonth"]),
+            display_env_table.style.map(risk_cell_style, subset=["OutbreakRisk_NextMonth"]),
             column_config={
                 "SHAP Explanation": st.column_config.TextColumn("SHAP Explanation", width="large"),
             },

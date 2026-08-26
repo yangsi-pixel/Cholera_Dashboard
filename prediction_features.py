@@ -3,26 +3,16 @@ from functools import lru_cache
 
 import numpy as np
 import pandas as pd
-import requests
-from region_coords import DEFAULT_COORDS, REGION_COORDS
+from supabase import Client, create_client
 
 try:
     import joblib
 except ImportError:
     joblib = None
 
-try:
-    from pymongo import MongoClient
-    from pymongo.server_api import ServerApi
-except ImportError:
-    MongoClient = None
-    ServerApi = None
-
-
-MONGODB_URI = os.getenv(
-    "MONGODB_URI",
-    "mongodb+srv://yangsisonia9_db_user:64687@cluster0.295yjzd.mongodb.net/",
-)
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://wvykyedcdloopzyfhlbe.supabase.co")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "sb_publishable_AcbXoyx9KzVP4TOd06oMeA_oq5YYp-s")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 ENSEMBLE_MODEL_PATH = "cholera_ensemble_model.pkl"
 ENSEMBLE_FEATURES_PATH = "cholera_ensemble_features.pkl"
 SAMPLE_DATA_PATH = "sample data.csv"
@@ -126,46 +116,6 @@ def pick_first_flexible(df_input: pd.DataFrame, candidates):
     return None
 
 
-def get_coords(region: str):
-    for key, value in REGION_COORDS.items():
-        if key.lower() in region.lower() or region.lower() in key.lower():
-            return value
-    return DEFAULT_COORDS
-
-
-def fetch_nasa_conditions_for_month(lat, lon, report_month_str):
-    month_dt = pd.to_datetime(f"{report_month_str}-01", errors="coerce")
-    if pd.isna(month_dt):
-        return {"rainfall_avg": None, "temp_avg": None, "humidity_avg": None, "month": None}
-
-    start_token = month_dt.strftime("%Y%m%d")
-    end_token = month_dt.to_period("M").end_time.strftime("%Y%m%d")
-    url = (
-        "https://power.larc.nasa.gov/api/temporal/daily/point?"
-        f"parameters=PRECTOT,T2M,RH2M&start={start_token}&end={end_token}"
-        f"&latitude={lat}&longitude={lon}&community=AG&format=JSON"
-    )
-    resp = requests.get(url, timeout=20)
-    resp.raise_for_status()
-
-    data = resp.json().get("properties", {}).get("parameter", {})
-
-    def monthly_average(parameter_name):
-        values = [
-            float(value)
-            for value in data.get(parameter_name, {}).values()
-            if value != -999
-        ]
-        return sum(values) / len(values) if values else None
-
-    return {
-        "rainfall_avg": monthly_average("PRECTOT"),
-        "temp_avg": monthly_average("T2M"),
-        "humidity_avg": monthly_average("RH2M"),
-        "month": month_dt.strftime("%Y-%m"),
-    }
-
-
 def standardize_prediction_records(raw_df: pd.DataFrame) -> pd.DataFrame:
     if raw_df.empty:
         return pd.DataFrame(
@@ -221,49 +171,26 @@ def standardize_prediction_records(raw_df: pd.DataFrame) -> pd.DataFrame:
     ].dropna(subset=["date"])
 
 
-def load_prediction_records_from_mongo(region: str) -> pd.DataFrame:
-    if MongoClient is None:
-        raise RuntimeError("pymongo is not installed. Run: pip install pymongo")
+def load_prediction_records_from_supabase(region: str) -> pd.DataFrame:
+    """Load a region's report history from Supabase for prediction features."""
+    columns = "date,region,district,confirmed,suspected,deaths,rainfall,temperature,humidity"
+    rows = []
+    page_size = 1000
+    start = 0
+    while True:
+        response = (
+            supabase.table("reports").select(columns).order("id")
+            .range(start, start + page_size - 1).execute()
+        )
+        page = response.data or []
+        rows.extend(page)
+        if len(page) < page_size:
+            break
+        start += page_size
 
-    client = MongoClient(MONGODB_URI, server_api=ServerApi("1"))
-    try:
-        client.admin.command("ping")
-
-        preferred_dbs = [
-            "cholera_monitoring_dashboard",
-            "cholera_monitoring_dashboad_project",
-            "cholera_monitoring_dashboard_project",
-            "cholera monitoring dashboad project",
-            "test",
-        ]
-        preferred_collections = ["reports", "report", "cholera_reports", "records"]
-
-        db_names = client.list_database_names()
-        ordered_dbs = [name for name in preferred_dbs if name in db_names] + [
-            name for name in db_names if name not in preferred_dbs and name not in {"admin", "local", "config"}
-        ]
-        target_region_norm = normalize_region_name(pd.Series([region])).iloc[0]
-
-        for db_name in ordered_dbs:
-            db = client[db_name]
-            col_names = db.list_collection_names()
-            ordered_cols = [name for name in preferred_collections if name in col_names] + [
-                name for name in col_names if name not in preferred_collections
-            ]
-
-            for col_name in ordered_cols:
-                docs = list(db[col_name].find({}, {"_id": 0}).limit(10000))
-                if not docs:
-                    continue
-
-                prediction_df = standardize_prediction_records(pd.DataFrame(docs))
-                prediction_df = prediction_df[prediction_df["region_norm"] == target_region_norm].copy()
-                if not prediction_df.empty:
-                    return prediction_df.sort_values("date")
-    finally:
-        client.close()
-
-    return pd.DataFrame()
+    prediction_df = standardize_prediction_records(pd.DataFrame(rows))
+    target_region_norm = normalize_single_region(region)
+    return prediction_df[prediction_df["region_norm"] == target_region_norm].sort_values("date")
 
 
 def load_sample_records(region: str) -> pd.DataFrame:
@@ -283,12 +210,12 @@ def has_usable_environment_data(records_df: pd.DataFrame) -> bool:
 
 
 def diagnose_region_history(region: str) -> dict:
-    records_df = load_prediction_records_from_mongo(region)
+    records_df = load_prediction_records_from_supabase(region)
     if records_df.empty:
         return {
             "region": region,
             "record_count": 0,
-            "message": "No MongoDB records matched this region after standardization.",
+            "message": "No Supabase records matched this region after standardization.",
         }
 
     records_df = records_df.copy()
@@ -300,7 +227,7 @@ def diagnose_region_history(region: str) -> dict:
             "region": region,
             "record_count": len(records_df),
             "valid_dated_record_count": 0,
-            "message": "MongoDB records matched the region, but none had a parseable date.",
+            "message": "Supabase records matched the region, but none had a parseable date.",
         }
 
     month_counts = valid_records.groupby("month_date").size().sort_index()
@@ -322,30 +249,12 @@ def diagnose_region_history(region: str) -> dict:
     }
 
 
-def backfill_monthly_environment_from_nasa(monthly_df: pd.DataFrame, region: str) -> pd.DataFrame:
+def fill_monthly_environment_gaps(monthly_df: pd.DataFrame) -> pd.DataFrame:
+    # Environmental values are stored in Supabase. Fill gaps only from nearby
+    # report periods; no external environmental API is used.
     monthly_df = monthly_df.copy()
-    lat, lon = get_coords(region)
-
-    for idx, row in monthly_df.iterrows():
-        missing_env = row[["rainfall_avg", "temperature_avg", "humidity_avg"]].isna()
-        if not missing_env.any():
-            continue
-
-        report_month = row["month_date"].strftime("%Y-%m")
-        try:
-            env_metrics = fetch_nasa_conditions_for_month(lat, lon, report_month)
-        except Exception:
-            env_metrics = {"rainfall_avg": None, "temp_avg": None, "humidity_avg": None}
-
-        if pd.isna(row["rainfall_avg"]) and env_metrics.get("rainfall_avg") is not None:
-            monthly_df.at[idx, "rainfall_avg"] = env_metrics["rainfall_avg"]
-        if pd.isna(row["temperature_avg"]) and env_metrics.get("temp_avg") is not None:
-            monthly_df.at[idx, "temperature_avg"] = env_metrics["temp_avg"]
-        if pd.isna(row["humidity_avg"]) and env_metrics.get("humidity_avg") is not None:
-            monthly_df.at[idx, "humidity_avg"] = env_metrics["humidity_avg"]
-
     monthly_df[["rainfall_avg", "temperature_avg", "humidity_avg"]] = (
-        monthly_df[["rainfall_avg", "temperature_avg", "humidity_avg"]].ffill().bfill()
+        monthly_df[["rainfall_avg", "temperature_avg", "humidity_avg"]].ffill().bfill().fillna(0)
     )
     return monthly_df
 
@@ -356,7 +265,7 @@ def resolve_feature_anchor_month(records_df: pd.DataFrame, region: str, target_m
     records_df = records_df.dropna(subset=["month_date"])
 
     if records_df.empty:
-        raise ValueError(f"Prediction cannot be generated: no dated MongoDB records were found for region '{region}'.")
+        raise ValueError(f"Prediction cannot be generated: no dated Supabase records were found for region '{region}'.")
 
     if target_month is None:
         return records_df["month_date"].max()
@@ -408,7 +317,7 @@ def aggregate_prediction_records_monthly(records_df: pd.DataFrame, region: str, 
         .reset_index()
     )
     monthly_df[["cases", "deaths"]] = monthly_df[["cases", "deaths"]].fillna(0)
-    return backfill_monthly_environment_from_nasa(monthly_df, region)
+    return fill_monthly_environment_gaps(monthly_df)
 
 
 def add_prediction_feature_columns(monthly_df: pd.DataFrame) -> pd.DataFrame:
@@ -480,22 +389,23 @@ def create_prediction_features_from_records(records_df: pd.DataFrame, region, ta
 
 def create_prediction_features(region, target_month=None) -> pd.DataFrame:
     """
-    Build the model input row for one region from MongoDB history.
+    Build the model input row for one region from Supabase history.
 
     By default the feature row is anchored to the latest report month found for the
     region. That row is intended to be fed into the model for next-month prediction.
-    If Southwest cannot be generated from MongoDB, local sample data is used.
+    If Supabase has no usable records for the requested region, local sample data
+    is used as the fallback.
 
     The returned DataFrame contains only the columns in PREDICTION_FEATURE_COLUMNS.
     A ValueError is raised with a user-facing message when available history is insufficient.
     """
     try:
-        records_df = load_prediction_records_from_mongo(region)
+        records_df = load_prediction_records_from_supabase(region)
         if records_df.empty:
-            raise ValueError(f"Prediction cannot be generated: no MongoDB records were found for region '{region}'.")
+            raise ValueError(f"Prediction cannot be generated: no Supabase records were found for region '{region}'.")
         if not has_usable_environment_data(records_df) and not load_sample_records(region).empty:
             raise ValueError(
-                f"MongoDB {region} records do not include usable rainfall, temperature, or humidity values."
+                f"Supabase {region} records do not include usable rainfall, temperature, or humidity values."
             )
         return create_prediction_features_from_records(records_df, region, target_month)
     except Exception as original_exc:
@@ -507,8 +417,8 @@ def create_prediction_features(region, target_month=None) -> pd.DataFrame:
             return create_prediction_features_from_records(sample_df, region, target_month)
         except Exception as sample_exc:
             raise ValueError(
-                "Prediction cannot be generated from MongoDB or sample data. "
-                f"MongoDB error: {original_exc}. Sample data error: {sample_exc}"
+                "Prediction cannot be generated from Supabase or sample data. "
+                f"Supabase error: {original_exc}. Sample data error: {sample_exc}"
             ) from sample_exc
 
 
@@ -537,6 +447,7 @@ def predict_next_month_risk(region) -> dict:
         "region": region,
         "prediction": int(prediction) if isinstance(prediction, (np.integer, int)) else prediction,
         "features": model_input,
+        "model": model,
     }
 
     if hasattr(model, "predict_proba"):
