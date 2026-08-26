@@ -200,6 +200,11 @@ def get_cached_region_prediction(region: str, report_fingerprint: str) -> dict:
         return {
             "OutbreakRisk_NextMonth": ENSEMBLE_RISK_LABELS.get(prediction, str(prediction)),
             "OutbreakRisk_Class": prediction,
+            "Prediction_Confidence": (
+                float(result["probabilities"].get(prediction)) * 100
+                if result.get("probabilities") and prediction in result["probabilities"]
+                else None
+            ),
             "Prediction_Error": "",
             "risk_explanation": explanation,
         }
@@ -207,6 +212,7 @@ def get_cached_region_prediction(region: str, report_fingerprint: str) -> dict:
         return {
             "OutbreakRisk_NextMonth": "Unavailable",
             "OutbreakRisk_Class": None,
+            "Prediction_Confidence": None,
             "Prediction_Error": str(exc),
             "risk_explanation": "Explanation unavailable.",
         }
@@ -241,5 +247,5 @@ def build_live_regional_monthly_environment_table(
     def predict_row(row):
         return pd.Series(get_cached_region_prediction(row["region"], fingerprints[row["region"]]))
 
-    monthly[["OutbreakRisk_NextMonth", "OutbreakRisk_Class", "Prediction_Error", "risk_explanation"]] = monthly.apply(predict_row, axis=1)
+    monthly[["OutbreakRisk_NextMonth", "OutbreakRisk_Class", "Prediction_Confidence", "Prediction_Error", "risk_explanation"]] = monthly.apply(predict_row, axis=1)
     return monthly

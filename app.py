@@ -465,6 +465,12 @@ def build_three_class_live_prediction(region, region_history):
         feature_row = feature_row.reindex(columns=list(model_features), fill_value=0)
 
     prediction = int(model.predict(feature_row)[0])
+    confidence = None
+    if hasattr(model, "predict_proba"):
+        classes = list(getattr(model, "classes_", []))
+        probabilities = model.predict_proba(feature_row)[0]
+        if prediction in classes:
+            confidence = float(probabilities[classes.index(prediction)]) * 100
     try:
         explanation = explain_risk_with_shap(feature_row, model)
     except Exception as exc:
@@ -472,6 +478,7 @@ def build_three_class_live_prediction(region, region_history):
     return {
         "prediction": prediction,
         "label": RISK_LABELS.get(prediction, str(prediction)),
+        "confidence": confidence,
         "explanation": explanation,
     }
 
@@ -1027,6 +1034,7 @@ def render_live_dashboard():
                         {
                             "OutbreakRisk_Class": result["prediction"],
                             "OutbreakRisk_NextMonth": result["label"],
+                            "Prediction_Confidence": result["confidence"],
                             "risk_explanation": result["explanation"],
                             "Prediction_Error": "",
                         }
@@ -1036,6 +1044,7 @@ def render_live_dashboard():
                         {
                             "OutbreakRisk_Class": pd.NA,
                             "OutbreakRisk_NextMonth": "Unavailable",
+                            "Prediction_Confidence": None,
                             "risk_explanation": "Explanation unavailable.",
                             "Prediction_Error": str(exc),
                         }
@@ -1055,6 +1064,7 @@ def render_live_dashboard():
             "report_month",
             "OutbreakRisk_Class",
             "OutbreakRisk_NextMonth",
+            "Prediction_Confidence",
             "risk_explanation",
         ]
 
@@ -1063,12 +1073,17 @@ def render_live_dashboard():
                 "region": "Region",
                 "report_month": "Last Report Month",
                 "OutbreakRisk_Class": "Model Output",
+                "Prediction_Confidence": "Prediction Confidence",
                 "risk_explanation": "SHAP Explanation",
             }
         )
         st.dataframe(
             display_env_table.style.map(risk_cell_style, subset=["OutbreakRisk_NextMonth"]),
             column_config={
+                "Prediction Confidence": st.column_config.NumberColumn(
+                    "Prediction Confidence",
+                    format="%.1f%%",
+                ),
                 "SHAP Explanation": st.column_config.TextColumn("SHAP Explanation", width="large"),
             },
             hide_index=True,
