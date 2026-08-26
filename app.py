@@ -1065,6 +1065,7 @@ def render_live_dashboard():
             "OutbreakRisk_Class",
             "OutbreakRisk_NextMonth",
             "Prediction_Confidence",
+            "Prediction_Error",
             "risk_explanation",
         ]
 
@@ -1074,6 +1075,7 @@ def render_live_dashboard():
                 "report_month": "Last Report Month",
                 "OutbreakRisk_Class": "Model Output",
                 "Prediction_Confidence": "Prediction Confidence",
+                "Prediction_Error": "Prediction Error",
                 "risk_explanation": "SHAP Explanation",
             }
         )
@@ -1083,6 +1085,10 @@ def render_live_dashboard():
                 "Prediction Confidence": st.column_config.NumberColumn(
                     "Prediction Confidence",
                     format="%.1f%%",
+                ),
+                "Prediction Error": st.column_config.TextColumn(
+                    "Prediction Error",
+                    width="large",
                 ),
                 "SHAP Explanation": st.column_config.TextColumn("SHAP Explanation", width="large"),
             },
