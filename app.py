@@ -229,7 +229,10 @@ def render_regional_hotspot_map(selected_year, selected_metric):
     year_label = "All Years" if selected_year is None else str(int(selected_year))
     map_title = f"Cameroon Regional Cholera Hotspot Map: {selected_metric} ({year_label})"
 
-    fig = px.choropleth_mapbox(
+    # ``choropleth_mapbox`` is the legacy Mapbox API and can fail on newer
+    # Plotly deployments.  The MapLibre-based API below has the same inputs
+    # without requiring Mapbox-specific internals or a token.
+    fig = px.choropleth_map(
         merged,
         geojson=geojson_data,
         locations="adm1_name",
@@ -237,7 +240,7 @@ def render_regional_hotspot_map(selected_year, selected_metric):
         color=selected_metric,
         hover_name="adm1_name",
         hover_data={"sCh": True, "cCh": True, "deaths": True, "cfr": ":.2f", "Region": False},
-        mapbox_style="white-bg",
+        map_style="white-bg",
         center=map_center,
         zoom=4.35,
         opacity=0.7,
