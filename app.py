@@ -1065,21 +1065,15 @@ def render_live_dashboard():
         risk_table_columns = [
             "region",
             "report_month",
-            "OutbreakRisk_Class",
             "OutbreakRisk_NextMonth",
             "Prediction_Confidence",
-            "Prediction_Error",
-            "risk_explanation",
         ]
 
         display_env_table = env_table[risk_table_columns].rename(
             columns={
                 "region": "Region",
                 "report_month": "Last Report Month",
-                "OutbreakRisk_Class": "Model Output",
                 "Prediction_Confidence": "Prediction Confidence",
-                "Prediction_Error": "Prediction Error",
-                "risk_explanation": "SHAP Explanation",
             }
         )
         st.dataframe(
@@ -1089,11 +1083,6 @@ def render_live_dashboard():
                     "Prediction Confidence",
                     format="%.1f%%",
                 ),
-                "Prediction Error": st.column_config.TextColumn(
-                    "Prediction Error",
-                    width="large",
-                ),
-                "SHAP Explanation": st.column_config.TextColumn("SHAP Explanation", width="large"),
             },
             hide_index=True,
             use_container_width=True,
