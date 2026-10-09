@@ -1137,6 +1137,9 @@ def render_live_dashboard():
             color = RISK_COLOR_MAP.get(str(value), "#455a64")
             return f"background-color: {color}; color: white; font-weight: 700"
 
+        st.subheader("Predicted Regional Cholera Risk Map")
+        render_live_risk_map(env_table, selected_risk_model)
+
         st.subheader("Risk Prediction Table")
         risk_table_columns = [
             "region",
@@ -1163,8 +1166,6 @@ def render_live_dashboard():
             hide_index=True,
             use_container_width=True,
         )
-        st.subheader("Predicted Regional Cholera Risk Map")
-        render_live_risk_map(env_table, selected_risk_model)
 
 
 def main():
