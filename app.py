@@ -1150,35 +1150,43 @@ def render_live_dashboard():
             color = RISK_COLOR_MAP.get(str(value), "#455a64")
             return f"background-color: {color}; color: white; font-weight: 700"
 
-        st.subheader("Predicted Regional Cholera Risk Map")
-        render_live_risk_map(env_table, selected_risk_model)
-
-        st.subheader("Risk Prediction Table")
-        risk_table_columns = [
-            "region",
-            "report_month",
-            "OutbreakRisk_NextMonth",
-            "Prediction_Confidence",
-        ]
-
-        display_env_table = env_table[risk_table_columns].rename(
-            columns={
-                "region": "Region",
-                "report_month": "Last Report Month",
-                "Prediction_Confidence": "Prediction Confidence",
-            }
+        prediction_view = st.radio(
+            "Prediction View",
+            ["Table", "Map"],
+            horizontal=True,
+            key="prediction_view",
+            label_visibility="collapsed",
         )
-        st.dataframe(
-            display_env_table.style.map(risk_cell_style, subset=["OutbreakRisk_NextMonth"]),
-            column_config={
-                "Prediction Confidence": st.column_config.NumberColumn(
-                    "Prediction Confidence",
-                    format="%.1f%%",
-                ),
-            },
-            hide_index=True,
-            use_container_width=True,
-        )
+        if prediction_view == "Map":
+            st.subheader("Predicted Regional Cholera Risk Map")
+            render_live_risk_map(env_table, selected_risk_model)
+        else:
+            st.subheader("Risk Prediction Table")
+            risk_table_columns = [
+                "region",
+                "report_month",
+                "OutbreakRisk_NextMonth",
+                "Prediction_Confidence",
+            ]
+
+            display_env_table = env_table[risk_table_columns].rename(
+                columns={
+                    "region": "Region",
+                    "report_month": "Last Report Month",
+                    "Prediction_Confidence": "Prediction Confidence",
+                }
+            )
+            st.dataframe(
+                display_env_table.style.map(risk_cell_style, subset=["OutbreakRisk_NextMonth"]),
+                column_config={
+                    "Prediction Confidence": st.column_config.NumberColumn(
+                        "Prediction Confidence",
+                        format="%.1f%%",
+                    ),
+                },
+                hide_index=True,
+                use_container_width=True,
+            )
 
 
 def main():
