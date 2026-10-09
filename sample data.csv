@@ -1,18 +1,4 @@
 region,district,date,confirmedcases,suspected cases,deaths,rainfall_avg,temperature_avg,humidity_avg
-Southwest,Buea,2025-06-01,4,1,0,8.0,26.0,70.0
-Southwest,Buea,2025-07-01,6,2,1,10.0,26.2,71.0
-Southwest,Buea,2025-08-01,5,2,1,12.0,26.4,72.0
-Southwest,Buea,2025-09-01,7,3,1,14.0,26.8,74.0
-Southwest,Buea,2025-10-01,9,3,1,16.0,27.0,75.0
-Southwest,Buea,2025-11-01,11,4,1,18.0,27.2,76.0
-Southwest,Buea,2025-12-01,13,5,1,22.0,27.5,78.0
-Southwest,Buea,2026-01-01,16,6,2,24.0,27.8,80.0
-Southwest,Buea,2026-02-01,20,8,2,26.0,28.0,82.0
-Southwest,Buea,2026-03-01,25,10,3,28.0,28.2,84.0
-Southwest,Buea,2026-04-01,32,13,4,30.0,28.5,86.0
-Southwest,Buea,2026-05-01,42,18,5,32.0,28.8,88.0
-Southwest,Buea,2026-06-01,63,27,7,35.0,29.0,90.0
-Southwest,Buea,2026-07-01,553,237,63,38.0,29.2,92.0
 Littoral,Douala,2025-06-01,1,1,0,1.0,23.0,55.0
 Littoral,Douala,2025-07-01,1,1,0,1.0,23.0,56.0
 Littoral,Douala,2025-08-01,1,1,0,2.0,24.0,55.0

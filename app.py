@@ -252,6 +252,82 @@ def render_regional_hotspot_map(selected_year, selected_metric):
     st.plotly_chart(fig, use_container_width=True)
 
 
+def render_live_risk_map(prediction_table: pd.DataFrame, selected_risk_model: str) -> None:
+    regional_boundaries = load_regional_boundaries()
+    risk_data = prediction_table[
+        ["region", "report_month", "OutbreakRisk_NextMonth"]
+    ].copy()
+    risk_data["region_key"] = normalize_region_name(risk_data["region"])
+    risk_data = risk_data.drop_duplicates("region_key", keep="last")
+
+    regional_boundaries["region_key"] = normalize_region_name(regional_boundaries["adm1_name"])
+    merged = regional_boundaries.merge(risk_data, how="left", on="region_key")
+    merged["risk_label"] = merged["OutbreakRisk_NextMonth"].fillna("Unavailable")
+
+    risk_categories = (
+        ["Low", "High"]
+        if selected_risk_model == "Two-Class Ensemble (Low/High)"
+        else ["Low", "Medium", "High"]
+    )
+    color_map = {**RISK_COLOR_MAP, "Unavailable": "#9e9e9e"}
+    present_categories = [
+        category for category in [*risk_categories, "Unavailable"]
+        if category in merged["risk_label"].values
+    ]
+
+    min_lon, min_lat, max_lon, max_lat = merged.total_bounds
+    map_center = {
+        "lat": float((min_lat + max_lat) / 2),
+        "lon": float((min_lon + max_lon) / 2),
+    }
+    geojson_data = json.loads(merged.to_json())
+    fig = px.choropleth_map(
+        merged,
+        geojson=geojson_data,
+        locations="adm1_name",
+        featureidkey="properties.adm1_name",
+        color="risk_label",
+        hover_name="adm1_name",
+        hover_data={
+            "risk_label": True,
+            "report_month": True,
+            "region_key": False,
+            "OutbreakRisk_NextMonth": False,
+        },
+        category_orders={"risk_label": present_categories},
+        color_discrete_map=color_map,
+        labels={
+            "risk_label": "Predicted Risk",
+            "report_month": "Last Report Month",
+        },
+        map_style="white-bg",
+        center=map_center,
+        zoom=4.35,
+        opacity=0.7,
+        title="Predicted Cholera Risk by Region",
+    )
+    fig.update_traces(marker_line_width=1.0, marker_line_color="black")
+    fig.update_layout(margin={"r": 0, "t": 60, "l": 0, "b": 0}, showlegend=False)
+    apply_chart_layout(fig, height=620)
+
+    map_col, legend_col = st.columns([5, 1])
+    with map_col:
+        st.plotly_chart(fig, use_container_width=True)
+    with legend_col:
+        legend_items = "".join(
+            f'<div style="display:flex;align-items:center;gap:8px;margin:8px 0;">'
+            f'<span style="width:16px;height:16px;background:{color_map[risk]};'
+            f'border-radius:3px;display:inline-block;"></span><span>{risk}</span></div>'
+            for risk in risk_categories
+        )
+        st.markdown(
+            f'<div style="padding-top:32px;"><strong>Risk level</strong>{legend_items}'
+            '<div style="font-size:0.8rem;color:#777;margin-top:12px;">'
+            'Grey regions have no prediction for the current filters.</div></div>',
+            unsafe_allow_html=True,
+        )
+
+
 def build_cfr_hotspot_data(df_input: pd.DataFrame, selected_year=None) -> pd.DataFrame:
     # Build CFR hotspot summary per region from historical case/death data only.
     working_df = df_input[["region_en", "TL", "cCh", "deaths"]].copy()
@@ -1087,6 +1163,8 @@ def render_live_dashboard():
             hide_index=True,
             use_container_width=True,
         )
+        st.subheader("Predicted Regional Cholera Risk Map")
+        render_live_risk_map(env_table, selected_risk_model)
 
 
 def main():

@@ -2,6 +2,9 @@ import { useMemo, useState } from "react";
 import axios from "axios";
 import "../styles/AdminPage.css";
 import { regionOptions } from "../data/cameroonDistricts";
+import { supabase } from '../supabaseClient'
+import { regionCoordinates } from "../regiocor";
+
 
 const initialFormState = {
   date: "",
@@ -44,14 +47,44 @@ function AdminPage() {
     setErrorMessage("");
   };
 
-  const today = new Date().toISOString().split("T")[0];
+const today = new Date().toISOString().split("T")[0];
+const cleanValue = (val) => {
+  return (val === -999 || val === -9999) ? null : val;
+};
 
-  const handleSubmit = async (event) => {
-    event.preventDefault();
-    setLoading(true);
-    setSuccessMessage("");
-    setErrorMessage("");
+const fetchNasaData = async (lat, lon, date) => {
+  const formattedDate = date.replace(/-/g, "");
+  const url = `https://power.larc.nasa.gov/api/temporal/daily/point?parameters=PRECTOT,T2M,RH2M&community=RE&longitude=${lon}&latitude=${lat}&start=${formattedDate}&end=${formattedDate}&format=JSON`;
 
+  const res = await fetch(url);
+  const json = await res.json();
+
+  return {
+    rainfall: cleanValue(json?.properties?.parameter?.PRECTOT?.[formattedDate]),
+    temperature: cleanValue(json?.properties?.parameter?.T2M?.[formattedDate]),
+    humidity: cleanValue(json?.properties?.parameter?.RH2M?.[formattedDate])
+  };
+};
+
+
+
+const handleSubmit = async (event) => {
+  event.preventDefault();
+  setLoading(true);
+  setSuccessMessage("");
+  setErrorMessage("");
+
+  try {
+    // Get lat/lon for the selected region
+    const coords = regionCoordinates[formData.region];
+    if (!coords) {
+      throw new Error("Coordinates not found for selected region");
+    }
+
+    // Fetch NASA data
+    const nasaData = await fetchNasaData(coords.lat, coords.lon, formData.date);
+
+    // Build payload
     const payload = {
       date: formData.date,
       region: formData.region,
@@ -59,22 +92,31 @@ function AdminPage() {
       suspected: Number(formData.suspected) || 0,
       confirmed: Number(formData.confirmed) || 0,
       deaths: Number(formData.deaths) || 0,
-      cfr
+      cfr,
+      rainfall: nasaData.rainfall,
+      temperature: nasaData.temperature,
+      humidity: nasaData.humidity
     };
 
-    try {
-      await axios.post("http://localhost:5000/api/reports", payload);
-      setSuccessMessage("Report submitted successfully.");
-      setFormData(initialFormState);
-    } catch (error) {
-      setErrorMessage(
-        error.response?.data?.message ||
-          "Submission failed. Please verify the server and try again."
-      );
-    } finally {
-      setLoading(false);
-    }
-  };
+    // Insert into Supabase
+    const { data, error } = await supabase
+      .from("reports")
+      .insert([payload])
+      .select();
+
+    if (error) throw error;
+
+    console.log("Inserted row:", data);
+    setSuccessMessage("Report submitted successfully.");
+    setFormData(initialFormState);
+  } catch (error) {
+    console.error("Submission error:", error);
+    setErrorMessage(error.message || "Submission failed.");
+  } finally {
+    setLoading(false);
+  }
+};
+
 
   return (
     <main className="admin-page">

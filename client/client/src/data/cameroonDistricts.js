@@ -1,5 +1,5 @@
 export const regionOptions = [
-  "Adamaoua",
+  "Adamawa",
   "Centre",
   "East",
   "Far North",
