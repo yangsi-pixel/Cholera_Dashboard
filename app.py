@@ -1053,17 +1053,30 @@ def render_live_dashboard():
         st.warning("No valid report dates are available in Supabase records.")
         return
 
-    live_month_labels = ["All Months"] + live_month_options
+    live_year_options = sorted({int(month[:4]) for month in live_month_options}, reverse=True)
+    selected_live_year = st.sidebar.selectbox("Report Year", ["All Years"] + live_year_options, index=0)
+    months_in_year = (
+        live_month_options
+        if selected_live_year == "All Years"
+        else [month for month in live_month_options if int(month[:4]) == selected_live_year]
+    )
     month_display_labels = {
-        month: pd.Period(month, freq="M").strftime("%B %Y")
-        for month in live_month_options
+        month: pd.Period(month, freq="M").strftime(
+            "%B" if selected_live_year != "All Years" else "%B %Y"
+        )
+        for month in months_in_year
     }
+    live_month_labels = ["All Months"] + months_in_year
     selected_live_month_label = st.sidebar.selectbox(
         "Report Month",
         live_month_labels,
         index=0,
         format_func=lambda month: month_display_labels.get(month, month),
     )
+    if selected_live_year != "All Years":
+        live_filtered = live_filtered[
+            live_filtered["report_month"].str.startswith(str(selected_live_year), na=False)
+        ].copy()
     live_chart_type = st.sidebar.radio(" Chart Type", ["Line", "Bar", "Pie"], index=0)
     selected_risk_model = st.sidebar.radio(
         "Risk Model",
