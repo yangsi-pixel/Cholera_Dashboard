@@ -1004,11 +1004,9 @@ def render_historical_dashboard(view_mode, regions, years):
 
 def render_live_dashboard():
     # Render the complete dashboard sourced from Supabase reports.
-    st.subheader("Cholera Reports - Supabase")
-
-    rcol, _ = st.columns([1, 5])
+    _, rcol = st.columns([10, 1])
     with rcol:
-        refresh_requested = st.button("Refresh Data")
+        refresh_requested = st.button("↻", help="Refresh data", type="secondary")
 
     try:
         if refresh_requested:
@@ -1025,8 +1023,6 @@ def render_live_dashboard():
     if live_df.empty:
         st.warning("No records were found in the Supabase reports table.")
         return
-
-    st.caption("Source: Supabase (reports)")
 
     # Build region options with deduplicated display names
     unique_regions = live_df["region"].dropna().unique()
@@ -1058,7 +1054,16 @@ def render_live_dashboard():
         return
 
     live_month_labels = ["All Months"] + live_month_options
-    selected_live_month_label = st.sidebar.selectbox(" Report Month", live_month_labels, index=0)
+    month_display_labels = {
+        month: pd.Period(month, freq="M").strftime("%B %Y")
+        for month in live_month_options
+    }
+    selected_live_month_label = st.sidebar.selectbox(
+        "Report Month",
+        live_month_labels,
+        index=0,
+        format_func=lambda month: month_display_labels.get(month, month),
+    )
     live_chart_type = st.sidebar.radio(" Chart Type", ["Line", "Bar", "Pie"], index=0)
     selected_risk_model = st.sidebar.radio(
         "Risk Model",
@@ -1072,12 +1077,6 @@ def render_live_dashboard():
             st.warning("No Supabase records for the selected month.")
             return
 
-    st.caption(
-        " month selected: All Months (aggregated)"
-        if selected_live_month_label == "All Months"
-        else f" month selected: {selected_live_month_label}"
-    )
-
     total_confirmed = int(live_filtered["confirmed"].sum())
     total_suspected = int(live_filtered["suspected"].sum())
     total_deaths = int(live_filtered["deaths"].sum())
@@ -1089,7 +1088,8 @@ def render_live_dashboard():
         live_case_df["TL"] = pd.to_datetime(live_case_df["date"], errors="coerce")
         live_case_df["cCh"] = live_case_df["confirmed"]
         live_case_df["sCh"] = live_case_df["suspected"]
-        live_title_suffix = " - All Months" if selected_live_month_label == "All Months" else f" - {selected_live_month_label}"
+        selected_month_display = month_display_labels.get(selected_live_month_label, selected_live_month_label)
+        live_title_suffix = f" - {selected_month_display}"
         live_chart_title = f" Cholera Cases in {selected_region} - {selected_district}{live_title_suffix}"
         if live_chart_type == "Pie":
             live_chart_title = f"Distribution of Cholera Metrics in {selected_region} - {selected_district}{live_title_suffix}"
