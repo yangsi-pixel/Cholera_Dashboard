@@ -1168,27 +1168,12 @@ def render_live_dashboard():
 
 
 def main():
-    # Application entrypoint: load data, configure mode, and render the active view.
-    global district_df, regional_env_df, view_mode
-
-    district_df, regional_env_df, years, regions = load_historical_data()
-
+    # Application entrypoint: render the live dashboard by default.
     with open("app_styles.css", "r", encoding="utf-8") as css_file:
         st.markdown(f"<style>{css_file.read()}</style>", unsafe_allow_html=True)
 
     st.title("Cameroon Cholera Monitoring Dashboard")
-
-    data_mode = st.sidebar.radio("Data Mode", ["Historical Data", " Recent Data"], index=0)
-    view_mode = (
-        st.sidebar.radio("Historical Data", ["By Year", "All Years Trend"], index=0)
-        if data_mode == "Historical Data"
-        else " Data"
-    )
-
-    if view_mode in ["By Year", "All Years Trend"]:
-        render_historical_dashboard(view_mode, regions, years)
-    else:
-        render_live_dashboard()
+    render_live_dashboard()
 
 
 if __name__ == "__main__":
