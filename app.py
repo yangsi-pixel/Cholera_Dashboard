@@ -362,7 +362,7 @@ def render_historical_cfr_hotspot_summary(df_input: pd.DataFrame, selected_year=
         x="region",
         y="cfr",
         color="cfr_risk",
-        category_orders={"cfr_risk": ["High", "Medium", "Low"]},
+        category_orders={"cfr_risk": ["High", "Low"]},
         color_discrete_map=RISK_COLOR_MAP,
         labels={"region": "Region", "cfr": "CFR (%)", "cfr_risk": "Risk"},
         title=summary_title,
@@ -779,11 +779,9 @@ def classify_environmental_risk(rainfall_avg, humidity_avg, temp_avg):
     return "Low"
 
 def classify_cfr_risk(cfr_value):
-    # Classify CFR risk using WHO-inspired thresholds: <1 low, 1-3 medium, >=3 high.
-    if cfr_value >= 3:
-        return "High"
+    # Classify CFR risk as low below 1% and high at 1% or above.
     if cfr_value >= 1:
-        return "Medium"
+        return "High"
     return "Low"
 
 
