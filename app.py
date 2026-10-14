@@ -8,6 +8,12 @@ import shap
 import streamlit as st
 from supabase import create_client
 
+st.set_page_config(
+    page_title="Cameroon Cholera Monitoring Dashboard",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
 try:
     import joblib
 except ImportError:
@@ -804,28 +810,27 @@ def render_metric_cards(confirmed, suspected, deaths, cfr):
     cfr_risk = classify_cfr_risk(cfr)
     cfr_risk_color = RISK_COLOR_MAP.get(cfr_risk, "#455a64")
 
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.markdown(f"""<div class=\"card\"><h3>Confirmed Cases</h3><p>{int(confirmed):,}</p></div>""", unsafe_allow_html=True)
-    with col2:
-        st.markdown(f"""<div class=\"card\"><h3>Suspected Cases</h3><p>{int(suspected):,}</p></div>""", unsafe_allow_html=True)
-    with col3:
-        st.markdown(f"""<div class=\"card\"><h3>Total Deaths</h3><p>{int(deaths):,}</p></div>""", unsafe_allow_html=True)
-    with col4:
-        st.markdown(
-            f"""
-            <div class=\"card\">
-                <h3>CFR (%)</h3>
-                <p style=\"margin-bottom:8px;\">{cfr:.2f}</p>
-                <div style=\"display:flex; align-items:center; justify-content:center; gap:8px; flex-wrap:wrap;\">
-                    <span style=\"background:{cfr_risk_color}; color:#fff; padding:3px 9px; border-radius:999px; font-size:0.78rem; font-weight:700;\">
-                        {cfr_risk}
-                    </span>
-                </div>
+    st.markdown(
+        f"""
+        <div class="metric-grid">
+            <div class="card metric-card confirmed-card">
+                <h3>Confirmed Cases</h3><p>{int(confirmed):,}</p>
             </div>
-            """,
-            unsafe_allow_html=True,
-        )
+            <div class="card metric-card suspected-card">
+                <h3>Suspected Cases</h3><p>{int(suspected):,}</p>
+            </div>
+            <div class="card metric-card deaths-card">
+                <h3>Total Deaths</h3><p>{int(deaths):,}</p>
+            </div>
+            <div class="card metric-card cfr-card">
+                <h3>CFR (%)</h3>
+                <p>{cfr:.2f}</p>
+                <span class="risk-badge" style="background:{cfr_risk_color};">{cfr_risk}</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def render_main_historical_chart(case_filtered_df, chart_type, chart_title):
@@ -1193,6 +1198,7 @@ def main():
         st.markdown(f"<style>{css_file.read()}</style>", unsafe_allow_html=True)
 
     st.title("Cameroon Cholera Monitoring Dashboard")
+    st.info("Use the dashboard filters in the sidebar. On a phone, tap ☰ in the top-left to open the menu if it is closed.")
     render_live_dashboard()
 
 
